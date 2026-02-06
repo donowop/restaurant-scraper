@@ -1,5 +1,6 @@
 """Main scraper orchestration for Google Maps restaurant data."""
 
+import json
 import os
 import time
 from datetime import datetime
@@ -11,7 +12,12 @@ from gmaps_scraper.config import Config
 from gmaps_scraper.checkpoint import CheckpointManager
 from gmaps_scraper.deduplication import DeduplicationManager
 from gmaps_scraper.geo import get_all_queries, get_test_queries
-from gmaps_scraper.extractors import scrape_search_results, scrape_places
+from gmaps_scraper.geo.locations import (
+    generate_remaining_zip_queries,
+    generate_cuisine_queries,
+    load_cities_from_csv,
+)
+from gmaps_scraper.extractors import scrape_search_results, scrape_searches, scrape_places
 
 
 def run_search_phase(
@@ -55,30 +61,36 @@ def run_search_phase(
 
         print(f"\n--- Search Batch {batch_num}/{total_batches} ({len(batch)} queries) ---")
 
+        # Filter out already completed queries
+        pending_queries = [q for q in batch if not checkpoint.is_search_completed(q.get("query", ""))]
+
+        if not pending_queries:
+            print("  All queries in batch already completed, skipping...")
+            continue
+
+        # Run searches in parallel
+        try:
+            results = scrape_searches(pending_queries, parallel=True)
+        except Exception as e:
+            print(f"  Batch error: {e}")
+            for q in pending_queries:
+                checkpoint.record_failure(q, str(e))
+            continue
+
         batch_links = []
-        for query_data in batch:
-            query = query_data.get("query", "")
+        for result in results:
+            query = result.get("search_data", {}).get("query", "")
 
-            if checkpoint.is_search_completed(query):
-                continue
+            if result and result.get("place_links"):
+                links = result["place_links"]
+                new_links = dedup.filter_unseen_links(links)
+                batch_links.extend(new_links)
+                print(f"  {query}: {len(links)} links ({len(new_links)} new)")
+            else:
+                error = result.get("error") if result else "No result"
+                print(f"  {query}: No links found ({error})")
 
-            try:
-                result = scrape_search_results(query_data)
-
-                if result and result.get("place_links"):
-                    links = result["place_links"]
-                    new_links = dedup.filter_unseen_links(links)
-                    batch_links.extend(new_links)
-                    print(f"  {query}: {len(links)} links ({len(new_links)} new)")
-                else:
-                    error = result.get("error") if result else "No result"
-                    print(f"  {query}: No links found ({error})")
-
-                checkpoint.mark_search_completed(query)
-
-            except Exception as e:
-                print(f"  {query}: Error - {e}")
-                checkpoint.record_failure(query_data, str(e))
+            checkpoint.mark_search_completed(query)
 
         if batch_links:
             added = checkpoint.add_pending_links(batch_links)
@@ -133,7 +145,21 @@ def run_details_phase(
         print("No pending links to process!")
         return
 
+    # Load existing results to merge with (preserves previous scrape data)
+    final_json = os.path.join(output_dir, "all_restaurants.json")
     all_restaurants = []
+    if os.path.exists(final_json):
+        try:
+            with open(final_json) as f:
+                existing = json.load(f)
+            if isinstance(existing, list):
+                all_restaurants = existing
+                for r in all_restaurants:
+                    dedup.mark_seen(r)
+                print(f"Loaded {len(all_restaurants)} existing restaurants from {final_json}")
+        except Exception as e:
+            print(f"Warning: Could not load existing results: {e}")
+
     batch_num = 0
     progress = checkpoint.get_progress()
 
@@ -177,7 +203,6 @@ def run_details_phase(
             time.sleep(Config.BATCH_DELAY)
 
     if all_restaurants:
-        final_json = os.path.join(output_dir, "all_restaurants.json")
         final_csv = os.path.join(output_dir, "all_restaurants.csv")
 
         bt.write_json(all_restaurants, final_json)
@@ -193,6 +218,105 @@ def run_details_phase(
         print(f"{'='*60}")
 
 
+def run_retry_phase(
+    checkpoint: CheckpointManager,
+    dedup: DeduplicationManager,
+    batch_size: Optional[int] = None,
+) -> None:
+    """
+    Phase 3: Retry failed search queries.
+
+    Args:
+        checkpoint: CheckpointManager instance
+        dedup: DeduplicationManager instance
+        batch_size: Number of searches per batch
+    """
+    if batch_size is None:
+        batch_size = Config.SEARCH_BATCH_SIZE
+
+    failures = checkpoint.get_failures()
+    # Filter to only search failures (those with 'query' field indicating a search query)
+    search_failures = [f for f in failures if isinstance(f.get("item"), dict) and "query" in f.get("item", {})]
+
+    print(f"\n{'='*60}")
+    print("PHASE 3: Retry Failed Searches")
+    print(f"{'='*60}")
+    print(f"Total failures recorded: {len(failures)}")
+    print(f"Search failures to retry: {len(search_failures)}")
+    print(f"{'='*60}\n")
+
+    if not search_failures:
+        print("No search failures to retry!")
+        return
+
+    # Extract query data from failures
+    queries = [f["item"] for f in search_failures]
+    retried_queries = []
+
+    for i in range(0, len(queries), batch_size):
+        batch = queries[i : i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (len(queries) + batch_size - 1) // batch_size
+
+        print(f"\n--- Retry Batch {batch_num}/{total_batches} ({len(batch)} queries) ---")
+
+        batch_links = []
+        for query_data in batch:
+            query = query_data.get("query", "")
+
+            if checkpoint.is_search_completed(query):
+                print(f"  {query}: Already completed, skipping")
+                retried_queries.append(query_data)
+                continue
+
+            try:
+                result = scrape_search_results(query_data)
+
+                if result and result.get("place_links"):
+                    links = result["place_links"]
+                    new_links = dedup.filter_unseen_links(links)
+                    batch_links.extend(new_links)
+                    print(f"  {query}: {len(links)} links ({len(new_links)} new)")
+                else:
+                    error = result.get("error") if result else "No result"
+                    print(f"  {query}: No links found ({error})")
+
+                checkpoint.mark_search_completed(query)
+                retried_queries.append(query_data)
+
+            except Exception as e:
+                print(f"  {query}: Retry failed - {e}")
+
+        if batch_links:
+            added = checkpoint.add_pending_links(batch_links)
+            print(f"\nBatch complete: Added {added} new links to pending queue")
+
+        progress = checkpoint.get_progress()
+        progress["completed_searches_count"] = checkpoint.get_completed_searches_count()
+        progress["total_links_found"] = checkpoint.get_pending_links_count()
+        checkpoint.save_progress(progress)
+        checkpoint.save_all()
+        dedup.save_checkpoint()
+
+        if i + batch_size < len(queries):
+            print(f"Waiting {Config.BATCH_DELAY} seconds before next batch...")
+            time.sleep(Config.BATCH_DELAY)
+
+    # Remove successfully retried items from failures
+    if retried_queries:
+        remaining_failures = [
+            f for f in failures
+            if f.get("item") not in retried_queries
+        ]
+        # Rewrite failures file with only non-retried items
+        checkpoint._save_failures(remaining_failures)
+        print(f"\nRetry phase complete! Cleared {len(retried_queries)} retried items from failures")
+
+    new_pending = checkpoint.get_pending_links_count()
+    if new_pending > 0:
+        print(f"New pending links from retries: {new_pending}")
+
+
 def run_scraper(
     test_mode: bool = False,
     test_limit: int = 5,
@@ -200,6 +324,10 @@ def run_scraper(
     skip_details: bool = False,
     cities_csv: Optional[str] = None,
     zip_codes_csv: Optional[str] = None,
+    fill_gaps: bool = False,
+    dry_run: bool = False,
+    cuisine_expansion: bool = False,
+    cuisine_min_population: int = 100_000,
 ) -> None:
     """
     Main scraper orchestration function.
@@ -211,6 +339,10 @@ def run_scraper(
         skip_details: Skip details phase (only collect links)
         cities_csv: Path to cities CSV file
         zip_codes_csv: Path to zip codes CSV file
+        fill_gaps: Search all remaining zip codes not yet queried
+        dry_run: Only show query counts, don't scrape
+        cuisine_expansion: Enable cuisine-specific queries for comprehensive coverage
+        cuisine_min_population: Min city population for cuisine expansion
     """
     print(f"\n{'#'*60}")
     print("US RESTAURANT SCRAPER")
@@ -230,7 +362,41 @@ def run_scraper(
     print(f"  - Restaurants saved: {stats['total_restaurants_saved']}")
     print(f"  - Dedup count: {dedup.count}")
 
-    if test_mode:
+    if fill_gaps:
+        completed_searches = set(checkpoint.get_completed_searches())
+        queries = generate_remaining_zip_queries(
+            completed_searches=completed_searches,
+            cities_csv=cities_csv,
+        )
+        print(f"\nFill-gaps mode: {len(queries)} remaining zip queries")
+        if dry_run:
+            print("\nDry run -- no scraping performed.")
+            return
+    elif cuisine_expansion:
+        # Cuisine expansion mode: generate cuisine-specific queries
+        completed_searches = set(checkpoint.get_completed_searches())
+        # Use default CSV path if not provided
+        import os as _os
+        csv_path = cities_csv
+        if csv_path is None:
+            default_csv = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+                "data", "uscities.csv",
+            )
+            if _os.path.exists(default_csv):
+                csv_path = default_csv
+        cities = load_cities_from_csv(csv_path, min_population=cuisine_min_population)
+        queries = generate_cuisine_queries(
+            cities=cities,
+            completed_searches=completed_searches,
+            min_population=cuisine_min_population,
+        )
+        print(f"\nCuisine expansion mode: {len(queries)} cuisine-specific queries")
+        print(f"  (for cities >= {cuisine_min_population:,} population)")
+        if dry_run:
+            print("\nDry run -- no scraping performed.")
+            return
+    elif test_mode:
         queries = get_test_queries(test_limit)
         print(f"\nTest mode: Using {len(queries)} test queries")
     else:
@@ -241,6 +407,9 @@ def run_scraper(
             business_type="restaurants",
         )
         print(f"\nProduction mode: {len(queries)} total queries")
+        if dry_run:
+            print("\nDry run -- no scraping performed.")
+            return
 
     # Phase 1: Search
     if not skip_search:
@@ -255,6 +424,20 @@ def run_scraper(
         progress["phase"] = "details"
         checkpoint.save_progress(progress)
         run_details_phase(checkpoint, dedup)
+
+    # Phase 3: Retry failed searches
+    if not skip_search and checkpoint.get_failures():
+        progress = checkpoint.get_progress()
+        progress["phase"] = "retry"
+        checkpoint.save_progress(progress)
+        run_retry_phase(checkpoint, dedup)
+
+        # Run details again if retries found new links
+        if not skip_details and checkpoint.get_pending_links_count() > 0:
+            progress = checkpoint.get_progress()
+            progress["phase"] = "details"
+            checkpoint.save_progress(progress)
+            run_details_phase(checkpoint, dedup)
 
     # Mark complete
     progress = checkpoint.get_progress()

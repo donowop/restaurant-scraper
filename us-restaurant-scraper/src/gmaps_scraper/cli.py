@@ -62,6 +62,27 @@ def main() -> int:
         action="store_true",
         help="Reset all checkpoints and start fresh",
     )
+    parser.add_argument(
+        "--fill-gaps",
+        action="store_true",
+        help="Search all remaining zip codes not yet queried (exhaustive coverage)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Only show query counts, don't scrape",
+    )
+    parser.add_argument(
+        "--cuisine-expansion",
+        action="store_true",
+        help="Enable cuisine-specific queries for comprehensive coverage",
+    )
+    parser.add_argument(
+        "--cuisine-min-population",
+        type=int,
+        default=100_000,
+        help="Min city population for cuisine expansion (default: 100000)",
+    )
 
     args = parser.parse_args()
 
@@ -84,6 +105,10 @@ def main() -> int:
         skip_details=args.skip_details,
         cities_csv=args.cities_csv,
         zip_codes_csv=args.zip_codes_csv,
+        fill_gaps=args.fill_gaps,
+        dry_run=args.dry_run,
+        cuisine_expansion=args.cuisine_expansion,
+        cuisine_min_population=args.cuisine_min_population,
     )
 
     return 0

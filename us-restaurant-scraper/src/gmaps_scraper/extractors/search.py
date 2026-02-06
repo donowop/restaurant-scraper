@@ -43,7 +43,7 @@ def _scroll_and_collect_links(
     link_selector = '[role="feed"] > div > div > a'
 
     # Wait for feed to load
-    driver.sleep(2)
+    driver.sleep(1)
 
     # Check if feed exists
     if not driver.is_element_present(feed_selector):
@@ -99,7 +99,7 @@ def _scroll_and_collect_links(
 
 @browser(
     block_images=True,
-    cache=True,
+    cache=False,  # Disabled - was causing stale cached results
     max_retry=3,
     retry_wait=10,
     headless=Config.HEADLESS,
@@ -136,7 +136,7 @@ def scrape_search_results(driver: Driver, search_data: dict) -> dict:
     try:
         # Navigate to search page
         driver.get(url)
-        driver.sleep(2)
+        driver.sleep(1)
 
         # Handle cookie consent
         _handle_cookie_consent(driver)
@@ -144,7 +144,7 @@ def scrape_search_results(driver: Driver, search_data: dict) -> dict:
         # If redirected to consent, navigate again
         if "consent.google.com" in driver.current_url:
             driver.get(url)
-            driver.sleep(2)
+            driver.sleep(1)
 
         # Scroll and collect links
         place_links = _scroll_and_collect_links(driver)
@@ -168,13 +168,13 @@ def scrape_search_results(driver: Driver, search_data: dict) -> dict:
 
 @browser(
     block_images=True,
-    cache=True,
+    cache=False,  # Disabled to prevent cache issues
     max_retry=3,
     retry_wait=10,
     headless=True,
     close_on_crash=True,
-    parallel=bt.calc_max_parallel_browsers,
-    reuse_driver=True,
+    parallel=Config.MAX_PARALLEL_BROWSERS,
+    reuse_driver=False,  # Disabled to prevent stale driver connections
 )
 def _scrape_search_results_parallel(driver: Driver, search_data: dict) -> dict:
     """Parallel version of scrape_search_results for batch processing."""

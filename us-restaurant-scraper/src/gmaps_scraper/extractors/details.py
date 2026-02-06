@@ -179,13 +179,14 @@ def _parse_address_components(address: str) -> dict[str, Optional[str]]:
     if zip_match:
         result["zip_code"] = zip_match.group(1)
 
-    # Extract state (2 letter abbreviation)
-    state_match = re.search(r"\b([A-Z]{2})\b", address)
+    # Extract state: look for 2-letter code immediately before the zip code
+    # This avoids matching directional prefixes like NW, SW, SE, NE in street addresses
+    state_match = re.search(r",\s*([A-Z]{2})\s+\d{5}", address)
     if state_match:
         result["state"] = state_match.group(1)
 
-    # Extract city
-    city_match = re.search(r",\s*([^,]+),\s*[A-Z]{2}\s*\d{5}", address)
+    # Extract city: the component before "STATE ZIP"
+    city_match = re.search(r",\s*([^,]+),\s*[A-Z]{2}\s+\d{5}", address)
     if city_match:
         result["city"] = city_match.group(1).strip()
 
@@ -389,6 +390,7 @@ def _extract_website(driver: Driver) -> Optional[str]:
     retry_wait=5,
     headless=Config.HEADLESS,
     close_on_crash=True,
+    proxy=Config.PROXY_LIST[0] if Config.PROXY_LIST else None,
 )
 def scrape_place_details(driver: Driver, place_url: str) -> Optional[dict]:
     """
@@ -504,6 +506,7 @@ def scrape_place_details(driver: Driver, place_url: str) -> Optional[dict]:
     close_on_crash=True,
     parallel=Config.MAX_PARALLEL_BROWSERS or 4,
     reuse_driver=True,
+    proxy=Config.PROXY_LIST[0] if Config.PROXY_LIST else None,
 )
 def _scrape_place_details_parallel(driver: Driver, place_url: str) -> Optional[dict]:
     """Parallel version of scrape_place_details for batch processing."""

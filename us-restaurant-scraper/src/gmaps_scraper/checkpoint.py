@@ -89,6 +89,12 @@ class CheckpointManager:
             self._completed_searches = self._load_completed_searches()
         return query in self._completed_searches
 
+    def get_completed_searches(self) -> set[str]:
+        """Get the set of completed search query strings."""
+        if self._completed_searches is None:
+            self._completed_searches = self._load_completed_searches()
+        return self._completed_searches
+
     def get_completed_searches_count(self) -> int:
         """Get count of completed searches."""
         if self._completed_searches is None:
@@ -193,6 +199,14 @@ class CheckpointManager:
                 os.remove(self._failed_items_file)
             except IOError:
                 pass
+
+    def _save_failures(self, failures: list[dict]) -> None:
+        """Save failures list to disk (used for updating after retries)."""
+        try:
+            with open(self._failed_items_file, "w") as f:
+                json.dump(failures, f, indent=2)
+        except IOError as e:
+            print(f"Warning: Could not save failures: {e}")
 
     def save_all(self) -> None:
         """Save all checkpoint data to disk."""

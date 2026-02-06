@@ -20,11 +20,11 @@ class Config:
     MIN_POPULATION = 50000  # ~800 cities, covers all major foodie destinations
 
     # Batch sizes
-    SEARCH_BATCH_SIZE = 50
+    SEARCH_BATCH_SIZE = 30  # Reduced for faster batch sync (was 50)
     DETAILS_BATCH_SIZE = 100
 
     # Rate limiting
-    BATCH_DELAY = 5  # Seconds between batches
+    BATCH_DELAY = 2  # Seconds between batches (reduced from 5)
 
     # Cache settings
     SEARCH_CACHE_EXPIRY = timedelta(days=7)
@@ -41,12 +41,26 @@ class Config:
     HEADLESS = True  # Production mode
 
     # Parallelization
-    MAX_PARALLEL_BROWSERS = 4
+    MAX_PARALLEL_BROWSERS = 5  # Sweet spot: 30 q/min with reduced scrolls
 
     # Output settings
     OUTPUT_DIR = "output"
     CHECKPOINT_DIR = "checkpoints"
 
+    # Zip code query tiers (population threshold -> max zip queries per city)
+    ZIP_TIERS = {
+        1_000_000: 20,
+        500_000: 10,
+        200_000: 5,
+        100_000: 2,
+        50_000: 0,
+    }
+
     # Scroll settings for search results
-    MAX_SCROLLS = 100
-    SCROLL_DELAY = 0.5
+    MAX_SCROLLS = 7  # Most queries finish in 1-5 scrolls
+    SCROLL_DELAY = 0.2  # Faster scrolling
+
+    # Cuisine expansion settings - search with cuisine-specific queries
+    # for comprehensive coverage in high-population areas
+    ENABLE_CUISINE_EXPANSION = True
+    CUISINE_EXPANSION_MIN_POPULATION = 100_000

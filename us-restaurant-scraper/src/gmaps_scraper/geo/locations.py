@@ -5,6 +5,7 @@ import os
 from typing import Optional
 
 from gmaps_scraper.config import Config
+from gmaps_scraper.cuisines import CUISINE_TYPES
 
 # Major US cities for testing (top 50 by population)
 TEST_CITIES = [
@@ -115,6 +116,7 @@ def load_cities_from_csv(filepath: str, min_population: Optional[int] = None) ->
                 "lat": row.get("lat"),
                 "lng": row.get("lng"),
                 "population": population,
+                "zips": row.get("zips", "").split(),
             })
 
     # Sort by population (largest first) for better coverage of important cities
@@ -204,6 +206,55 @@ def generate_zip_queries(
     return queries
 
 
+def _get_zip_cap(population: int) -> int:
+    """Return max zip code queries for a city based on population tier."""
+    for threshold, cap in sorted(Config.ZIP_TIERS.items(), reverse=True):
+        if population >= threshold:
+            return cap
+    return 0
+
+
+def _select_evenly_spaced(items: list, count: int) -> list:
+    """Select `count` items evenly spaced from the list for geographic spread."""
+    if count <= 0:
+        return []
+    if count >= len(items):
+        return items
+    step = len(items) / count
+    return [items[int(i * step)] for i in range(count)]
+
+
+def generate_zip_queries_from_cities(
+    cities: list[dict],
+    business_type: str = "restaurants",
+) -> list[dict]:
+    """Generate zip code queries for large cities using population-tiered caps."""
+    queries = []
+    for city in cities:
+        population = city.get("population", 0)
+        cap = _get_zip_cap(population)
+        if cap == 0:
+            continue
+
+        zips = city.get("zips", [])
+        if not zips:
+            continue
+
+        selected = _select_evenly_spaced(zips, cap)
+        for zip_code in selected:
+            queries.append({
+                "query": f"{business_type} near {zip_code}",
+                "zip_code": zip_code,
+                "city": city.get("city", ""),
+                "state": city.get("state", ""),
+                "type": "zip",
+                "lat": city.get("lat"),
+                "lng": city.get("lng"),
+            })
+
+    return queries
+
+
 def get_all_queries(
     cities_csv: Optional[str] = None,
     zip_codes_csv: Optional[str] = None,
@@ -226,6 +277,15 @@ def get_all_queries(
     Returns:
         List of query dicts with metadata
     """
+    # Default to bundled data file
+    if cities_csv is None:
+        default_csv = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            "data", "uscities.csv",
+        )
+        if os.path.exists(default_csv):
+            cities_csv = default_csv
+
     # Load cities
     if cities_csv and os.path.exists(cities_csv):
         cities = load_cities_from_csv(cities_csv)
@@ -236,13 +296,115 @@ def get_all_queries(
     queries = generate_city_queries(cities, business_type)
 
     # Add zip code queries if requested
-    if include_zip_codes and zip_codes_csv:
-        zip_codes = load_zip_codes_from_csv(zip_codes_csv)
-        queries.extend(generate_zip_queries(zip_codes, business_type))
+    if include_zip_codes:
+        if zip_codes_csv:
+            zip_codes = load_zip_codes_from_csv(zip_codes_csv)
+            queries.extend(generate_zip_queries(zip_codes, business_type))
+        else:
+            queries.extend(generate_zip_queries_from_cities(cities, business_type))
 
     # Limit for test mode
     if test_mode:
         queries = queries[:test_limit]
+
+    return queries
+
+
+def generate_remaining_zip_queries(
+    completed_searches: set[str],
+    cities_csv: str | None = None,
+    business_type: str = "restaurants",
+    min_population: int = 50_000,
+) -> list[dict]:
+    """Generate queries for all zip codes not yet searched.
+
+    Used by --fill-gaps mode to exhaustively search every zip code
+    in cities >= min_population that wasn't covered in previous runs.
+    """
+    if cities_csv is None:
+        default_csv = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            "data", "uscities.csv",
+        )
+        if os.path.exists(default_csv):
+            cities_csv = default_csv
+
+    if not cities_csv or not os.path.exists(cities_csv):
+        print("Error: No cities CSV found for fill-gaps mode")
+        return []
+
+    cities = load_cities_from_csv(cities_csv, min_population)
+    queries = []
+    seen_zips: set[str] = set()
+
+    for city in cities:
+        zips = city.get("zips", [])
+        for zip_code in zips:
+            if zip_code in seen_zips:
+                continue
+            seen_zips.add(zip_code)
+            query_str = f"{business_type} near {zip_code}"
+            if query_str not in completed_searches:
+                queries.append({
+                    "query": query_str,
+                    "zip_code": zip_code,
+                    "city": city.get("city", ""),
+                    "state": city.get("state", ""),
+                    "type": "zip_fill",
+                    "lat": city.get("lat"),
+                    "lng": city.get("lng"),
+                })
+
+    return queries
+
+
+def generate_cuisine_queries(
+    cities: list[dict],
+    completed_searches: set[str],
+    min_population: int = 100_000,
+) -> list[dict]:
+    """Generate cuisine-specific queries for high-population zip codes.
+
+    For each zip code in cities >= min_population, generates queries like:
+    - "Thai restaurants near 11201"
+    - "Italian restaurants near 11201"
+    - etc.
+
+    This surfaces restaurants that don't rank highly in generic searches.
+
+    Args:
+        cities: List of city dicts with 'population' and 'zips' fields
+        completed_searches: Set of already-completed query strings
+        min_population: Only expand cuisines for cities >= this population
+
+    Returns:
+        List of query dicts with metadata
+    """
+    queries = []
+    seen_zips: set[str] = set()
+
+    for city in cities:
+        if city.get("population", 0) < min_population:
+            continue
+
+        for zip_code in city.get("zips", []):
+            if zip_code in seen_zips:
+                continue
+            seen_zips.add(zip_code)
+
+            for cuisine in CUISINE_TYPES:
+                query_str = f"{cuisine} restaurants near {zip_code}"
+                if query_str not in completed_searches:
+                    queries.append({
+                        "query": query_str,
+                        "zip_code": zip_code,
+                        "city": city.get("city", ""),
+                        "state": city.get("state", ""),
+                        "type": "cuisine_zip",
+                        "cuisine": cuisine,
+                        "lat": city.get("lat"),
+                        "lng": city.get("lng"),
+                    })
 
     return queries
 
