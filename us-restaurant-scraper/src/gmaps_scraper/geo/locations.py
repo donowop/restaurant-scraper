@@ -119,8 +119,18 @@ def load_cities_from_csv(filepath: str, min_population: Optional[int] = None) ->
                 "zips": row.get("zips", "").split(),
             })
 
-    # Sort by population (largest first) for better coverage of important cities
-    cities = sorted(cities, key=lambda x: x["population"], reverse=True)
+    # Sort by state priority (NY first, CA second) then by population
+    def state_priority(city: dict) -> tuple:
+        state = city.get("state", "")
+        if state == "NY":
+            priority = 0
+        elif state == "CA":
+            priority = 1
+        else:
+            priority = 2
+        return (priority, -city["population"])  # Negative for descending population
+
+    cities = sorted(cities, key=state_priority)
 
     if min_population:
         print(f"Loaded {len(cities)} cities with population >= {min_population:,} (skipped {skipped:,} smaller cities)")
