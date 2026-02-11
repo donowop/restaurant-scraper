@@ -83,6 +83,19 @@ def main() -> int:
         default=100_000,
         help="Min city population for cuisine expansion (default: 100000)",
     )
+    parser.add_argument(
+        "--cuisine-tier",
+        type=str,
+        choices=["aggressive", "moderate", "conservative", "none"],
+        default="moderate",
+        help="Zip sampling tier for cuisine expansion: aggressive (~68K queries), "
+             "moderate (~105K), conservative (~159K), none (~304K, no sampling)",
+    )
+    parser.add_argument(
+        "--scrape-omitted",
+        action="store_true",
+        help="Only scrape previously omitted zips from checkpoints/omitted_zips.json",
+    )
 
     args = parser.parse_args()
 
@@ -109,6 +122,8 @@ def main() -> int:
         dry_run=args.dry_run,
         cuisine_expansion=args.cuisine_expansion,
         cuisine_min_population=args.cuisine_min_population,
+        cuisine_tier=args.cuisine_tier,
+        scrape_omitted=args.scrape_omitted,
     )
 
     return 0

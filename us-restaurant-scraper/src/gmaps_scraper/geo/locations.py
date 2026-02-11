@@ -224,6 +224,27 @@ def _get_zip_cap(population: int) -> int:
     return 0
 
 
+def _get_cuisine_zip_cap(population: int, preset: Optional[str] = None) -> Optional[int]:
+    """Return max zip queries for cuisine expansion based on population tier.
+
+    Args:
+        population: City population
+        preset: Tier preset name ('aggressive', 'moderate', 'conservative', or None for no limit)
+
+    Returns:
+        Max zips to sample, or None for no limit
+    """
+    if preset is None or preset == "none":
+        return None
+
+    tiers = Config.CUISINE_ZIP_TIERS.get(preset, Config.CUISINE_ZIP_TIERS.get("moderate", {}))
+
+    for threshold, cap in sorted(tiers.items(), reverse=True):
+        if population >= threshold:
+            return cap
+    return 2  # Default minimum for cities at threshold
+
+
 def _select_evenly_spaced(items: list, count: int) -> list:
     """Select `count` items evenly spaced from the list for geographic spread."""
     if count <= 0:
@@ -372,7 +393,10 @@ def generate_cuisine_queries(
     cities: list[dict],
     completed_searches: set[str],
     min_population: int = 100_000,
-) -> list[dict]:
+    tier_preset: Optional[str] = None,
+    use_omitted_only: bool = False,
+    omitted_zips_data: Optional[dict] = None,
+) -> tuple[list[dict], dict]:
     """Generate cuisine-specific queries for high-population zip codes.
 
     For each zip code in cities >= min_population, generates queries like:
@@ -386,18 +410,101 @@ def generate_cuisine_queries(
         cities: List of city dicts with 'population' and 'zips' fields
         completed_searches: Set of already-completed query strings
         min_population: Only expand cuisines for cities >= this population
+        tier_preset: Sampling tier ('aggressive', 'moderate', 'conservative', or None for all)
+        use_omitted_only: If True, only query previously omitted zips from omitted_zips_data
+        omitted_zips_data: Data from checkpoints/omitted_zips.json for --scrape-omitted mode
 
     Returns:
-        List of query dicts with metadata
+        Tuple of (queries list, omitted_info dict for tracking)
     """
     queries = []
     seen_zips: set[str] = set()
+    omitted_info: dict = {
+        "tier_preset": tier_preset or "none",
+        "total_sampled": 0,
+        "total_omitted": 0,
+        "by_city": {},
+    }
 
+    # If using omitted-only mode, get the set of previously omitted zips
+    if use_omitted_only and omitted_zips_data:
+        omitted_zips_set: set[str] = set()
+        for city_data in omitted_zips_data.get("by_city", {}).values():
+            omitted_zips_set.update(city_data.get("omitted", []))
+
+        for city in cities:
+            if city.get("population", 0) < min_population:
+                continue
+
+            for zip_code in city.get("zips", []):
+                if zip_code not in omitted_zips_set:
+                    continue
+                if zip_code in seen_zips:
+                    continue
+                seen_zips.add(zip_code)
+
+                for cuisine in CUISINE_TYPES:
+                    query_str = f"{cuisine} restaurants near {zip_code}"
+                    if query_str not in completed_searches:
+                        queries.append({
+                            "query": query_str,
+                            "zip_code": zip_code,
+                            "city": city.get("city", ""),
+                            "state": city.get("state", ""),
+                            "type": "cuisine_zip",
+                            "cuisine": cuisine,
+                            "lat": city.get("lat"),
+                            "lng": city.get("lng"),
+                        })
+
+        return queries, omitted_info
+
+    # Build set of extra cities to include regardless of population
+    extra_cities_set = set(Config.CUISINE_EXTRA_CITIES) if hasattr(Config, 'CUISINE_EXTRA_CITIES') else set()
+
+    # Normal mode: apply tier-based sampling
     for city in cities:
-        if city.get("population", 0) < min_population:
+        city_pop = city.get("population", 0)
+        city_tuple = (city.get("city", ""), city.get("state", ""))
+        is_extra = city_tuple in extra_cities_set
+
+        if city_pop < min_population and not is_extra:
             continue
 
-        for zip_code in city.get("zips", []):
+        all_zips = city.get("zips", [])
+        if not all_zips:
+            continue
+
+        city_key = f"{city.get('city', '')}, {city.get('state', '')}"
+
+        # Get cap based on tier preset
+        cap = _get_cuisine_zip_cap(city_pop, tier_preset)
+
+        if cap is None or cap >= len(all_zips):
+            # No sampling needed - use all zips
+            selected_zips = all_zips
+            city_omitted: list[str] = []
+        else:
+            # Sample evenly-spaced zips
+            selected_zips = _select_evenly_spaced(all_zips, cap)
+            selected_set = set(selected_zips)
+            city_omitted = [z for z in all_zips if z not in selected_set]
+
+        # Track omitted zips for this city
+        if city_omitted:
+            omitted_info["by_city"][city_key] = {
+                "population": city_pop,
+                "total_zips": len(all_zips),
+                "sampled": len(selected_zips),
+                "sampled_zips": selected_zips,
+                "omitted": city_omitted,
+            }
+            omitted_info["total_omitted"] += len(city_omitted)
+
+        omitted_info["total_sampled"] += len(selected_zips)
+
+        # Generate queries for selected zips
+        for zip_code in selected_zips:
             if zip_code in seen_zips:
                 continue
             seen_zips.add(zip_code)
@@ -416,7 +523,7 @@ def generate_cuisine_queries(
                         "lng": city.get("lng"),
                     })
 
-    return queries
+    return queries, omitted_info
 
 
 def get_test_queries(limit: int = 5) -> list[dict]:

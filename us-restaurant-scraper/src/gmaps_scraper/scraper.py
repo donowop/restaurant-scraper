@@ -2,11 +2,45 @@
 
 import json
 import os
+import subprocess
 import time
 from datetime import datetime
 from typing import Optional
 
 from botasaurus import bt
+
+
+def _restart_chrome_browsers() -> None:
+    """Kill all Chrome processes spawned by botasaurus to clear memory leaks."""
+    try:
+        # Kill Chrome processes from bota temp directories
+        result = subprocess.run(
+            ["pkill", "-f", "bota/"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print("  [Memory] Killed Chrome processes for memory cleanup")
+        time.sleep(2)  # Give time for cleanup
+    except Exception as e:
+        print(f"  [Memory] Warning: Could not restart Chrome: {e}")
+
+
+def _cleanup_system_processes() -> None:
+    """Kill resource-hogging system processes (ReportCrash, reset fseventsd)."""
+    try:
+        # Kill ReportCrash if running (accumulates CPU over time)
+        subprocess.run(["pkill", "-f", "ReportCrash"], capture_output=True)
+
+        # Reset fseventsd (accumulates memory from checkpoint file writes)
+        # Requires sudo, but will work if NOPASSWD is configured
+        subprocess.run(
+            ["sudo", "-n", "killall", "-HUP", "fseventsd"],
+            capture_output=True,
+        )
+        print("  [Memory] Cleaned up ReportCrash and reset fseventsd")
+    except Exception as e:
+        print(f"  [Memory] System cleanup skipped: {e}")
 
 from gmaps_scraper.config import Config
 from gmaps_scraper.checkpoint import CheckpointManager
@@ -199,6 +233,12 @@ def run_details_phase(
         remaining = checkpoint.get_pending_links_count()
         print(f"Progress: {len(all_restaurants)} restaurants saved, {remaining} links remaining")
 
+        # Periodic memory cleanup: restart Chrome and cleanup system processes
+        if batch_num % Config.CHROME_RESTART_INTERVAL == 0:
+            print(f"\n  [Memory] Performing periodic cleanup (every {Config.CHROME_RESTART_INTERVAL} batches)...")
+            _restart_chrome_browsers()
+            _cleanup_system_processes()
+
         if remaining > 0:
             time.sleep(Config.BATCH_DELAY)
 
@@ -328,6 +368,8 @@ def run_scraper(
     dry_run: bool = False,
     cuisine_expansion: bool = False,
     cuisine_min_population: int = 100_000,
+    cuisine_tier: str = "moderate",
+    scrape_omitted: bool = False,
 ) -> None:
     """
     Main scraper orchestration function.
@@ -343,6 +385,8 @@ def run_scraper(
         dry_run: Only show query counts, don't scrape
         cuisine_expansion: Enable cuisine-specific queries for comprehensive coverage
         cuisine_min_population: Min city population for cuisine expansion
+        cuisine_tier: Zip sampling tier for cuisine expansion ('aggressive', 'moderate', 'conservative', 'none')
+        scrape_omitted: Only scrape previously omitted zips from checkpoints/omitted_zips.json
     """
     print(f"\n{'#'*60}")
     print("US RESTAURANT SCRAPER")
@@ -372,7 +416,7 @@ def run_scraper(
         if dry_run:
             print("\nDry run -- no scraping performed.")
             return
-    elif cuisine_expansion:
+    elif cuisine_expansion or scrape_omitted:
         # Cuisine expansion mode: generate cuisine-specific queries
         completed_searches = set(checkpoint.get_completed_searches())
         # Use default CSV path if not provided
@@ -386,13 +430,55 @@ def run_scraper(
             if _os.path.exists(default_csv):
                 csv_path = default_csv
         cities = load_cities_from_csv(csv_path, min_population=cuisine_min_population)
-        queries = generate_cuisine_queries(
+
+        # Load previously omitted zips if scrape_omitted mode
+        omitted_zips_data = None
+        if scrape_omitted:
+            omitted_file = os.path.join(Config.CHECKPOINT_DIR, "omitted_zips.json")
+            if os.path.exists(omitted_file):
+                try:
+                    with open(omitted_file) as f:
+                        omitted_zips_data = json.load(f)
+                    print(f"\nLoaded omitted zips from {omitted_file}")
+                    print(f"  Total omitted: {omitted_zips_data.get('total_omitted', 0)} zips")
+                except Exception as e:
+                    print(f"Warning: Could not load omitted zips: {e}")
+            else:
+                print(f"\nWarning: No omitted_zips.json found at {omitted_file}")
+                print("Run with --cuisine-expansion first to generate omitted zips data.")
+                return
+
+        # Determine tier preset
+        tier_preset = None if cuisine_tier == "none" else cuisine_tier
+        if scrape_omitted:
+            tier_preset = None  # Don't sample when scraping omitted
+
+        queries, omitted_info = generate_cuisine_queries(
             cities=cities,
             completed_searches=completed_searches,
             min_population=cuisine_min_population,
+            tier_preset=tier_preset,
+            use_omitted_only=scrape_omitted,
+            omitted_zips_data=omitted_zips_data,
         )
-        print(f"\nCuisine expansion mode: {len(queries)} cuisine-specific queries")
-        print(f"  (for cities >= {cuisine_min_population:,} population)")
+
+        if scrape_omitted:
+            print(f"\nScrape-omitted mode: {len(queries)} queries for previously omitted zips")
+        else:
+            print(f"\nCuisine expansion mode: {len(queries)} cuisine-specific queries")
+            print(f"  Tier: {cuisine_tier}")
+            print(f"  Sampled zips: {omitted_info.get('total_sampled', 0)}")
+            print(f"  Omitted zips: {omitted_info.get('total_omitted', 0)}")
+            print(f"  (for cities >= {cuisine_min_population:,} population)")
+
+            # Save omitted zips info for potential follow-up scraping
+            if omitted_info.get("total_omitted", 0) > 0:
+                omitted_info["generated_at"] = datetime.now().isoformat()
+                omitted_file = os.path.join(Config.CHECKPOINT_DIR, "omitted_zips.json")
+                with open(omitted_file, "w") as f:
+                    json.dump(omitted_info, f, indent=2)
+                print(f"  Omitted zips saved to: {omitted_file}")
+
         if dry_run:
             print("\nDry run -- no scraping performed.")
             return

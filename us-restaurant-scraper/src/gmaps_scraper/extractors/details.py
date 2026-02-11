@@ -93,6 +93,63 @@ def _parse_rating(rating_text: str) -> Optional[float]:
         return None
 
 
+def _extract_rating_robust(driver: Driver, debug: bool = False) -> Optional[float]:
+    """
+    Extract rating using multiple fallback selectors.
+    Google Maps frequently changes CSS classes, so we try several approaches.
+    """
+    # List of selectors to try, in order of preference
+    rating_selectors = [
+        "div.F7nice > span",  # Current known selector
+        "div.F7nice span:first-child",  # Variant
+        "span.ceNzKf",  # Alternative class
+        "div.fontDisplayLarge",  # Rating in large font
+        "[role='img'][aria-label*='stars']",  # Aria-label fallback
+        "span[aria-hidden='true']",  # Hidden rating text
+    ]
+
+    for selector in rating_selectors:
+        try:
+            if driver.is_element_present(selector, wait=1):
+                text = driver.get_text(selector)
+                if text:
+                    # Check for aria-label pattern "X.X stars"
+                    if "stars" in text.lower():
+                        match = re.search(r"([\d,.]+)\s*stars?", text.lower())
+                        if match:
+                            return _parse_rating(match.group(1))
+                    # Try direct parse
+                    rating = _parse_rating(text)
+                    if rating and 1.0 <= rating <= 5.0:
+                        return rating
+        except Exception:
+            continue
+
+    # Try aria-label approach on any element with stars info
+    try:
+        elements = driver.select_all("[aria-label*='star']", wait=1)
+        for el in elements[:5]:  # Check first 5 matches
+            label = el.get_attribute("aria-label")
+            if label:
+                match = re.search(r"([\d,.]+)\s*stars?", label.lower())
+                if match:
+                    return _parse_rating(match.group(1))
+    except Exception:
+        pass
+
+    # Debug: Check if we're on a blocked/CAPTCHA page
+    if debug:
+        try:
+            page_text = driver.get_text("body")[:500] if driver.is_element_present("body") else ""
+            url = driver.current_url
+            print(f"  [DEBUG] URL: {url[:80]}")
+            print(f"  [DEBUG] Page preview: {page_text[:200]}...")
+        except Exception as e:
+            print(f"  [DEBUG] Error getting page info: {e}")
+
+    return None
+
+
 def _parse_review_count(reviews_text: str) -> Optional[int]:
     """Parse review count from text like '(1,234 reviews)'."""
     if not reviews_text:
@@ -385,7 +442,7 @@ def _extract_website(driver: Driver) -> Optional[str]:
 
 @browser(
     block_images=False,
-    cache=True,
+    cache=False,  # Disabled - prevents Connection refused errors
     max_retry=3,
     retry_wait=5,
     headless=Config.HEADLESS,
@@ -410,7 +467,12 @@ def scrape_place_details(driver: Driver, place_url: str) -> Optional[dict]:
 
     try:
         driver.get(place_url)
-        driver.sleep(4)
+
+        # Wait for page to load - check for h1 (place name) as indicator
+        for _ in range(3):  # Try up to 3 times with increasing waits
+            driver.sleep(2)
+            if driver.is_element_present("h1", wait=2):
+                break
 
         _handle_cookie_consent(driver)
 
@@ -433,14 +495,13 @@ def scrape_place_details(driver: Driver, place_url: str) -> Optional[dict]:
             print("  Warning: Could not extract name, skipping")
             return None
 
-        # Extract rating and apply filter
-        rating_text = None
-        try:
-            rating_text = driver.get_text("div.F7nice > span")
-        except Exception:
-            pass
+        # Extract rating using robust multi-selector approach
+        rating = _extract_rating_robust(driver)
 
-        rating = _parse_rating(rating_text)
+        if rating is None:
+            # Retry once with longer wait if rating not found
+            driver.sleep(2)
+            rating = _extract_rating_robust(driver, debug=True)
 
         if rating is None or rating < Config.MIN_RATING:
             print(f"  Skipping: Rating {rating} is below minimum {Config.MIN_RATING}")
@@ -499,13 +560,13 @@ def scrape_place_details(driver: Driver, place_url: str) -> Optional[dict]:
 
 @browser(
     block_images=False,
-    cache=True,
+    cache=False,  # Disabled - prevents Connection refused errors
     max_retry=3,
     retry_wait=5,
     headless=Config.HEADLESS,
     close_on_crash=True,
     parallel=Config.MAX_PARALLEL_BROWSERS or 4,
-    reuse_driver=True,
+    reuse_driver=False,  # Disabled - prevents stale driver connections
     proxy=Config.PROXY_LIST[0] if Config.PROXY_LIST else None,
 )
 def _scrape_place_details_parallel(driver: Driver, place_url: str) -> Optional[dict]:
