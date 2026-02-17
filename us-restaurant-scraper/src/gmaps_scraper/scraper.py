@@ -160,8 +160,16 @@ def run_details_phase(
         except Exception as e:
             print(f"Warning: Could not load existing results: {e}")
 
-    batch_num = 0
+    # Find the max existing batch number to avoid overwriting previous batch files
+    existing_batches = [
+        int(f.split("_")[-1].split(".")[0])
+        for f in os.listdir(output_dir)
+        if f.startswith("restaurants_batch_") and f.endswith(".json")
+    ] if os.path.exists(output_dir) else []
+    batch_num = max(existing_batches) if existing_batches else 0
     progress = checkpoint.get_progress()
+    consecutive_empty_batches = 0
+    MAX_CONSECUTIVE_EMPTY = 5  # halt after 5 batches with 0 results
 
     while True:
         batch = checkpoint.get_next_batch(batch_size)
@@ -182,6 +190,23 @@ def run_details_phase(
                 bt.write_json(unique_results, batch_file)
 
                 print(f"Saved {len(unique_results)} unique restaurants (batch {batch_num})")
+
+            # Error rate monitoring: if 0 results from a full batch, something is wrong
+            if len(results) == 0 and len(batch) > 0:
+                consecutive_empty_batches += 1
+                print(f"  WARNING: 0 results from {len(batch)} links! "
+                      f"({consecutive_empty_batches}/{MAX_CONSECUTIVE_EMPTY} consecutive)")
+                if consecutive_empty_batches >= MAX_CONSECUTIVE_EMPTY:
+                    print(f"\n  HALTING: {MAX_CONSECUTIVE_EMPTY} consecutive batches with 0 results.")
+                    print("  Browser connections are likely failing. Check cache/reuse_driver settings.")
+                    # Don't remove remaining links so they can be retried
+                    checkpoint.remove_processed_links(batch)
+                    progress["completed_details"] = progress.get("completed_details", 0) + len(batch)
+                    progress["total_restaurants_saved"] = len(all_restaurants)
+                    checkpoint.save_progress(progress)
+                    break
+            else:
+                consecutive_empty_batches = 0
 
             checkpoint.remove_processed_links(batch)
 

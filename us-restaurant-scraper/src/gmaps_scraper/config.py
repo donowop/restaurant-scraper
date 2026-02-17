@@ -32,10 +32,9 @@ class Config:
 
     # Proxy settings (for large-scale scraping)
     # Set OXYLABS_PROXY_URL environment variable or create .env file
-    USE_PROXIES = True
-    PROXY_LIST: list[str] = [
-        os.environ.get("OXYLABS_PROXY_URL", ""),
-    ] if os.environ.get("OXYLABS_PROXY_URL") else []
+    # NOTE: Oxylabs proxy is DOWN (connection refused). Do NOT re-enable until fixed.
+    USE_PROXIES = False
+    PROXY_LIST: list[str] = []
 
     # Browser settings
     HEADLESS = True  # Production mode

@@ -12,7 +12,9 @@
 ```bash
 cat us-restaurant-scraper/checkpoints/progress.json
 ```
-Fields: `completed_searches_count` / 334666, `total_links_found`, `total_restaurants_saved`
+Fields: `completed_searches_count` / 105184, `total_links_found`, `total_restaurants_saved`
+
+Query count: 38 cuisines × 2,768 sampled zips = 105,184 (moderate tier)
 
 Rate = completed / (hours * 60) q/min | ETA = remaining / rate / 60 hours
 
@@ -40,8 +42,14 @@ SEARCH_BATCH_SIZE = 30      # Smaller batches = faster sync
 
 ### Commands
 ```bash
-# Start scraper
+# Start scraper (moderate tier is default)
 cd us-restaurant-scraper && PYTHONPATH=src python3 -m gmaps_scraper --cuisine-expansion
+
+# Different tiers: aggressive (~68K), moderate (~105K), conservative (~159K), none (~304K)
+PYTHONPATH=src python3 -m gmaps_scraper --cuisine-expansion --cuisine-tier aggressive
+
+# Scrape previously omitted zips (follow-up phase)
+PYTHONPATH=src python3 -m gmaps_scraper --cuisine-expansion --scrape-omitted
 
 # Dry run
 PYTHONPATH=src python3 -m gmaps_scraper --cuisine-expansion --dry-run
@@ -64,7 +72,7 @@ ps aux | grep -i chrome | grep -v grep | wc -l
 ```
 | Metric | Value |
 |--------|-------|
-| Completed | X / 334,666 (Y%) |
+| Completed | X / 105,184 (Y%) |
 | Links | Z |
 | Rate | N q/min |
 | ETA | M days |
