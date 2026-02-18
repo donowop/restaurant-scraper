@@ -104,6 +104,9 @@ def run_phase1(query_file: str, dedup: DeduplicationManager):
     batch_size = Config.SEARCH_BATCH_SIZE
     total_new_links = 0
     start_time = time.time()
+    consecutive_error_batches = 0
+    MAX_CONSECUTIVE_ERROR_BATCHES = 5
+    ERROR_RATE_THRESHOLD = 0.8  # halt if 80%+ errors in a batch
 
     for i in range(0, len(remaining_strs), batch_size):
         batch_strs = remaining_strs[i : i + batch_size]
@@ -118,9 +121,15 @@ def run_phase1(query_file: str, dedup: DeduplicationManager):
             results = scrape_searches(batch_dicts, parallel=True)
         except Exception as e:
             print(f"  Batch error: {e}")
+            consecutive_error_batches += 1
+            if consecutive_error_batches >= MAX_CONSECUTIVE_ERROR_BATCHES:
+                print(f"\n  HALTING: {MAX_CONSECUTIVE_ERROR_BATCHES} consecutive batch errors.")
+                print("  Check browser connections and network.")
+                break
             continue
 
         batch_new = 0
+        batch_errors = 0
         for result in results:
             query = result.get("search_data", {}).get("query", "")
 
@@ -136,10 +145,25 @@ def run_phase1(query_file: str, dedup: DeduplicationManager):
             else:
                 error = result.get("error") if result else "No result"
                 print(f"  {query}: 0 links ({error})")
+                if error and "Connection refused" in str(error):
+                    batch_errors += 1
 
             completed.add(query)
 
         total_new_links += batch_new
+
+        # Error rate monitoring
+        error_rate = batch_errors / len(batch_strs) if batch_strs else 0
+        if error_rate >= ERROR_RATE_THRESHOLD:
+            consecutive_error_batches += 1
+            print(f"  WARNING: {error_rate:.0%} error rate in batch! "
+                  f"({consecutive_error_batches}/{MAX_CONSECUTIVE_ERROR_BATCHES} consecutive)")
+            if consecutive_error_batches >= MAX_CONSECUTIVE_ERROR_BATCHES:
+                print(f"\n  HALTING: {MAX_CONSECUTIVE_ERROR_BATCHES} consecutive high-error batches.")
+                print("  Browsers are likely failing. Check cache/reuse_driver settings.")
+                break
+        else:
+            consecutive_error_batches = 0
 
         # Save checkpoint every batch
         save_json(RECOVERY_COMPLETED_SEARCHES, list(completed))
@@ -201,7 +225,12 @@ def run_phase2(dedup: DeduplicationManager):
     batch_size = Config.DETAILS_BATCH_SIZE
     batch_num = 0
     consecutive_empty = 0
+    consecutive_high_error = 0
     MAX_CONSECUTIVE_EMPTY = 5
+    MAX_CONSECUTIVE_HIGH_ERROR = 5
+    ERROR_RATE_THRESHOLD = 0.8  # halt if 80%+ of batch returns None
+    total_processed = 0
+    total_errors = 0
 
     while pending_links:
         batch = pending_links[:batch_size]
@@ -212,7 +241,11 @@ def run_phase2(dedup: DeduplicationManager):
         try:
             results = scrape_places(batch, parallel=True)
             valid = [r for r in results if r is not None]
+            failed_count = len(batch) - len(valid)
             unique = dedup.filter_unique(valid)
+
+            total_processed += len(batch)
+            total_errors += failed_count
 
             if unique:
                 all_results.extend(unique)
@@ -220,10 +253,27 @@ def run_phase2(dedup: DeduplicationManager):
                 consecutive_empty = 0
             else:
                 consecutive_empty += 1
-                print(f"  0 results ({consecutive_empty}/{MAX_CONSECUTIVE_EMPTY} consecutive empty)")
+                print(f"  0 new results ({consecutive_empty}/{MAX_CONSECUTIVE_EMPTY} consecutive empty)")
 
+            # Error rate monitoring per batch
+            error_rate = failed_count / len(batch) if batch else 0
+            if error_rate >= ERROR_RATE_THRESHOLD:
+                consecutive_high_error += 1
+                print(f"  WARNING: {error_rate:.0%} error rate ({failed_count}/{len(batch)} failed)! "
+                      f"({consecutive_high_error}/{MAX_CONSECUTIVE_HIGH_ERROR} consecutive)")
+            else:
+                consecutive_high_error = 0
+                if failed_count > 0:
+                    print(f"  {failed_count}/{len(batch)} failed ({error_rate:.0%})")
+
+            # Halt conditions
             if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
                 print(f"\n  HALTING: {MAX_CONSECUTIVE_EMPTY} consecutive empty batches.")
+                break
+            if consecutive_high_error >= MAX_CONSECUTIVE_HIGH_ERROR:
+                print(f"\n  HALTING: {MAX_CONSECUTIVE_HIGH_ERROR} consecutive batches with {ERROR_RATE_THRESHOLD:.0%}+ errors.")
+                print(f"  Overall error rate: {total_errors}/{total_processed} ({total_errors/total_processed:.0%})")
+                print("  Browsers are likely broken. Check cache/reuse_driver settings.")
                 break
 
         except Exception as e:
