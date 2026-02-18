@@ -18,10 +18,10 @@ echo "Started: $(date)"
 echo "=========================================="
 
 # Clean up stale Chrome processes before starting
-CHROME_COUNT=$(pgrep -f "Google Chrome.*bota" 2>/dev/null | wc -l | tr -d ' ')
+CHROME_COUNT=$(pgrep -f "Google Chrome.*bota" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
 if [ "$CHROME_COUNT" -gt 0 ]; then
     echo "Cleaning up $CHROME_COUNT stale Chrome processes..."
-    pkill -9 -f "Google Chrome.*bota" 2>/dev/null
+    pkill -9 -f "Google Chrome.*bota" 2>/dev/null || true
     sleep 2
 fi
 
