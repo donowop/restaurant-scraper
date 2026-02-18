@@ -19,8 +19,37 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import time
 from datetime import datetime
+
+
+# --- Chrome process management ---
+MAX_HEALTHY_CHROME = 60
+
+def count_chrome_processes() -> int:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "Google Chrome.*bota"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+    except Exception:
+        return 0
+
+def kill_stale_chrome():
+    try:
+        subprocess.run(["pkill", "-9", "-f", "Google Chrome.*bota"], capture_output=True, timeout=10)
+        time.sleep(2)
+        print(f"  Chrome cleanup: {count_chrome_processes()} processes remaining")
+    except Exception as e:
+        print(f"  Chrome cleanup error: {e}")
+
+def check_chrome_health():
+    count = count_chrome_processes()
+    if count > MAX_HEALTHY_CHROME:
+        print(f"\n  WARNING: {count} Chrome processes (max: {MAX_HEALTHY_CHROME}). Cleaning up...")
+        kill_stale_chrome()
 
 SCRAPER_ROOT = os.path.join(os.path.dirname(__file__), "us-restaurant-scraper")
 CHECKPOINT_DIR = os.path.join(SCRAPER_ROOT, "checkpoints")
@@ -288,6 +317,9 @@ def rescrape_places(place_ids):
         except Exception as e:
             print(f"  Batch error: {e}")
 
+        # Check Chrome health every 5 batches
+        if batch_num % 5 == 0:
+            check_chrome_health()
         time.sleep(Config.BATCH_DELAY)
 
     # Final save
@@ -354,6 +386,12 @@ def main():
     print("=" * 60)
     print(f"Started: {datetime.now().isoformat()}")
     print(f"Rating filter: {MIN_RATING}+ stars\n")
+
+    # Clean up stale Chrome before starting
+    chrome_count = count_chrome_processes()
+    if chrome_count > 0:
+        print(f"Cleaning up {chrome_count} stale Chrome processes...")
+        kill_stale_chrome()
 
     if args.place_ids_file:
         print(f"--- Loading place_ids from {args.place_ids_file} ---")

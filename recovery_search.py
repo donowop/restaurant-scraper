@@ -15,6 +15,8 @@ import argparse
 import json
 import os
 import re
+import signal
+import subprocess
 import time
 from datetime import datetime
 
@@ -22,6 +24,44 @@ from datetime import datetime
 from gmaps_scraper.config import Config
 from gmaps_scraper.deduplication import DeduplicationManager
 from gmaps_scraper.extractors import scrape_searches, scrape_places
+
+
+# --- Chrome process management ---
+MAX_HEALTHY_CHROME = 60  # 5 browsers × ~10 processes each + buffer
+
+def count_chrome_processes() -> int:
+    """Count running Chrome processes spawned by botasaurus."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "Google Chrome.*bota"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+    except Exception:
+        return 0
+
+def kill_stale_chrome():
+    """Kill all botasaurus Chrome processes."""
+    try:
+        subprocess.run(
+            ["pkill", "-9", "-f", "Google Chrome.*bota"],
+            capture_output=True, timeout=10,
+        )
+        time.sleep(2)
+        remaining = count_chrome_processes()
+        print(f"  Chrome cleanup: {remaining} processes remaining")
+    except Exception as e:
+        print(f"  Chrome cleanup error: {e}")
+
+def check_chrome_health(phase: str):
+    """Check Chrome process count and clean up if bloated."""
+    count = count_chrome_processes()
+    if count > MAX_HEALTHY_CHROME:
+        print(f"\n  WARNING: {count} Chrome processes detected (max healthy: {MAX_HEALTHY_CHROME})")
+        print(f"  Cleaning up stale Chrome processes...")
+        kill_stale_chrome()
+        return False  # caller should know cleanup happened
+    return True
 
 # --- Paths (relative to us-restaurant-scraper/) ---
 RECOVERY_CHECKPOINT_DIR = "checkpoints_recovery"
@@ -189,6 +229,9 @@ def run_phase1(query_file: str, dedup: DeduplicationManager):
         })
 
         if i + batch_size < len(remaining_strs):
+            # Check Chrome health every 10 batches
+            if batch_num % 10 == 0:
+                check_chrome_health("Phase 1")
             time.sleep(Config.BATCH_DELAY)
 
     print(f"\n{'='*60}")
@@ -297,6 +340,9 @@ def run_phase2(dedup: DeduplicationManager):
         print(f"  Remaining: {len(pending_links)} links")
 
         if pending_links:
+            # Check Chrome health every 5 batches
+            if batch_num % 5 == 0:
+                check_chrome_health("Phase 2")
             time.sleep(Config.BATCH_DELAY)
 
     print(f"\n{'='*60}")
@@ -315,6 +361,12 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(RECOVERY_CHECKPOINT_DIR, exist_ok=True)
+
+    # Clean up stale Chrome before starting
+    chrome_count = count_chrome_processes()
+    if chrome_count > 0:
+        print(f"Cleaning up {chrome_count} stale Chrome processes before start...")
+        kill_stale_chrome()
 
     # Use the MAIN seen_places.json for dedup
     dedup = DeduplicationManager(MAIN_SEEN_PLACES)

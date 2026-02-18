@@ -17,6 +17,14 @@ echo "FULL RECOVERY PIPELINE — $MACHINE"
 echo "Started: $(date)"
 echo "=========================================="
 
+# Clean up stale Chrome processes before starting
+CHROME_COUNT=$(pgrep -f "Google Chrome.*bota" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$CHROME_COUNT" -gt 0 ]; then
+    echo "Cleaning up $CHROME_COUNT stale Chrome processes..."
+    pkill -9 -f "Google Chrome.*bota" 2>/dev/null
+    sleep 2
+fi
+
 # --- Step 1: Recovery (pre-load cached links → Phase 1 re-search → Phase 2 scrape) ---
 LINKS_FILE="../${MACHINE}_recovery_links.json"
 QUERY_FILE="../${MACHINE}_recovery_queries.json"
