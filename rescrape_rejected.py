@@ -273,7 +273,7 @@ def rescrape_places(place_ids):
             else:
                 consecutive_bad_batches = 0
 
-            # Checkpoint
+            # Checkpoint — save both done_ids AND results every batch
             for url in batch:
                 pid = _extract_place_id_from_url(url)
                 if pid:
@@ -281,6 +281,9 @@ def rescrape_places(place_ids):
 
             with open(RESCRAPE_CHECKPOINT, "w") as f:
                 json.dump(list(done_ids), f)
+
+            with open(RESCRAPE_OUTPUT, "w") as f:
+                json.dump(all_results, f)
 
         except Exception as e:
             print(f"  Batch error: {e}")
