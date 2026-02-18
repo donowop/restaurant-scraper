@@ -181,7 +181,13 @@ def run_details_phase(
 
         try:
             results = scrape_places(batch, parallel=True)
-            unique_results = dedup.filter_unique(results)
+
+            # Separate successful results from failures
+            # scrape_places returns None for failed extractions
+            successful = [r for r in results if r is not None]
+            failed_count = len(batch) - len(successful)
+
+            unique_results = dedup.filter_unique(successful)
 
             if unique_results:
                 all_restaurants.extend(unique_results)
@@ -191,24 +197,35 @@ def run_details_phase(
 
                 print(f"Saved {len(unique_results)} unique restaurants (batch {batch_num})")
 
+            # Only remove links that were successfully processed (got a result)
+            # Failed links stay in pending for retry
+            if successful:
+                # Build set of successfully processed URLs by matching batch order
+                # results[i] corresponds to batch[i]
+                processed_links = [
+                    batch[i] for i, r in enumerate(results) if r is not None
+                ]
+                checkpoint.remove_processed_links(processed_links)
+                if failed_count > 0:
+                    print(f"  Keeping {failed_count} failed links in pending for retry")
+            else:
+                # All failed - don't remove any links
+                print(f"  All {len(batch)} links failed, keeping in pending")
+
             # Error rate monitoring: if 0 results from a full batch, something is wrong
-            if len(results) == 0 and len(batch) > 0:
+            if len(successful) == 0 and len(batch) > 0:
                 consecutive_empty_batches += 1
                 print(f"  WARNING: 0 results from {len(batch)} links! "
                       f"({consecutive_empty_batches}/{MAX_CONSECUTIVE_EMPTY} consecutive)")
                 if consecutive_empty_batches >= MAX_CONSECUTIVE_EMPTY:
                     print(f"\n  HALTING: {MAX_CONSECUTIVE_EMPTY} consecutive batches with 0 results.")
                     print("  Browser connections are likely failing. Check cache/reuse_driver settings.")
-                    # Don't remove remaining links so they can be retried
-                    checkpoint.remove_processed_links(batch)
                     progress["completed_details"] = progress.get("completed_details", 0) + len(batch)
                     progress["total_restaurants_saved"] = len(all_restaurants)
                     checkpoint.save_progress(progress)
                     break
             else:
                 consecutive_empty_batches = 0
-
-            checkpoint.remove_processed_links(batch)
 
             progress["completed_details"] = progress.get("completed_details", 0) + len(batch)
             progress["total_restaurants_saved"] = len(all_restaurants)
@@ -219,7 +236,7 @@ def run_details_phase(
             print(f"Error processing batch: {e}")
             for link in batch:
                 checkpoint.record_failure(link, str(e))
-            checkpoint.remove_processed_links(batch)
+            # Don't remove links on exception - keep for retry
 
         remaining = checkpoint.get_pending_links_count()
         print(f"Progress: {len(all_restaurants)} restaurants saved, {remaining} links remaining")
