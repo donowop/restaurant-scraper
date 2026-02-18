@@ -343,6 +343,10 @@ def rescrape_places(place_ids):
 def main():
     parser = argparse.ArgumentParser(description="Re-scrape rejected/failed places")
     parser.add_argument("--dry-run", action="store_true", help="Show counts only")
+    parser.add_argument(
+        "--place-ids-file",
+        help="JSON file with list of place_ids to rescrape (skips auto-recovery)",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -351,8 +355,14 @@ def main():
     print(f"Started: {datetime.now().isoformat()}")
     print(f"Rating filter: {MIN_RATING}+ stars\n")
 
-    print("--- Recovering place_ids ---")
-    rejected = recover_rejected_place_ids()
+    if args.place_ids_file:
+        print(f"--- Loading place_ids from {args.place_ids_file} ---")
+        with open(args.place_ids_file) as f:
+            rejected = set(json.load(f))
+        print(f"Loaded: {len(rejected):,} place_ids")
+    else:
+        print("--- Recovering place_ids ---")
+        rejected = recover_rejected_place_ids()
 
     if args.dry_run:
         print("\nDry run — no scraping performed.")
