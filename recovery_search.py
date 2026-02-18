@@ -182,9 +182,21 @@ def run_phase1(query_file: str, dedup: DeduplicationManager):
     print(f"{'='*60}\n")
 
 
-def run_phase2(dedup: DeduplicationManager):
+def run_phase2(dedup: DeduplicationManager, links_file: str = None):
     """Phase 2: Scrape details from recovered pending links."""
-    pending_links = load_json(RECOVERY_PENDING_LINKS, [])
+    if links_file:
+        # Load links directly from file (skips Phase 1 entirely)
+        with open(links_file) as f:
+            links = json.load(f)
+        # Merge with any existing pending links
+        existing = set(load_json(RECOVERY_PENDING_LINKS, []))
+        for link in links:
+            existing.add(link)
+        pending_links = list(existing)
+        save_json(RECOVERY_PENDING_LINKS, pending_links)
+        print(f"Loaded {len(links)} links from {links_file}")
+    else:
+        pending_links = load_json(RECOVERY_PENDING_LINKS, [])
 
     print(f"\n{'='*60}")
     print("RECOVERY PHASE 2: Scrape details from recovered links")
@@ -269,9 +281,10 @@ def run_phase2(dedup: DeduplicationManager):
 
 def main():
     parser = argparse.ArgumentParser(description="Recovery search for lost links")
-    parser.add_argument("--query-file", required=True, help="JSON file with list of query strings")
+    parser.add_argument("--query-file", help="JSON file with list of query strings (required for Phase 1)")
     parser.add_argument("--search-only", action="store_true", help="Only run Phase 1 (search), skip details")
     parser.add_argument("--skip-search", action="store_true", help="Skip Phase 1, only run Phase 2 on existing pending")
+    parser.add_argument("--links-file", type=str, help="JSON file with list of URLs for direct Phase 2 (skips Phase 1)")
     args = parser.parse_args()
 
     os.makedirs(RECOVERY_CHECKPOINT_DIR, exist_ok=True)
@@ -280,11 +293,15 @@ def main():
     dedup = DeduplicationManager(MAIN_SEEN_PLACES)
     print(f"Dedup loaded: {dedup.place_id_count} place_ids, {len(dedup.seen_hashes)} hashes")
 
-    if not args.skip_search:
-        run_phase1(args.query_file, dedup)
+    if args.links_file:
+        # Direct Phase 2 from links file (no Phase 1 needed)
+        run_phase2(dedup, links_file=args.links_file)
+    else:
+        if not args.skip_search:
+            run_phase1(args.query_file, dedup)
 
-    if not args.search_only:
-        run_phase2(dedup)
+        if not args.search_only:
+            run_phase2(dedup)
 
 
 if __name__ == "__main__":
