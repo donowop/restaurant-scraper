@@ -1,27 +1,20 @@
 #!/usr/bin/env python3
 """
-Recovery Phase 1 + Phase 2 script.
+Recovery script for lost links from the broken cache=True run.
 
-Re-runs search queries to regenerate pending links that were lost in the
-broken cache=True run. Uses seen_places for dedup so only unseen links
-are collected and scraped.
+Flow: Pre-load cached links → Phase 1 re-search (adds more) → Phase 2 scrapes all.
 
 Usage:
     cd us-restaurant-scraper
-    PYTHONPATH=src python3 -u ../recovery_search.py --query-file ../m1_recovery_queries.json
-
-    # Dry run (Phase 1 only, no detail scraping)
-    PYTHONPATH=src python3 -u ../recovery_search.py --query-file ../m1_recovery_queries.json --search-only
-
-    # Skip Phase 1, scrape existing pending links only
-    PYTHONPATH=src python3 -u ../recovery_search.py --query-file ../m1_recovery_queries.json --skip-search
+    PYTHONPATH=src python3 -u ../recovery_search.py \
+        --query-file ../m1_recovery_queries.json \
+        --links-file ../m1_recovery_links.json
 """
 
 import argparse
 import json
 import os
 import re
-import sys
 import time
 from datetime import datetime
 
@@ -58,50 +51,55 @@ def save_json(path, data):
 
 
 def query_str_to_dict(query_str: str) -> dict:
-    """Convert a query string like 'Chinese restaurants near 11229' to a query dict."""
-    # Extract zip code from end
+    """Convert 'Chinese restaurants near 11229' to a query dict."""
     match = re.search(r"near\s+(\d{5})$", query_str)
     zip_code = match.group(1) if match else ""
-
-    # Extract cuisine from beginning
     cuisine_match = re.match(r"^(.+?)\s+restaurants\s+near", query_str)
     cuisine = cuisine_match.group(1) if cuisine_match else ""
+    return {"query": query_str, "zip_code": zip_code, "type": "cuisine_zip", "cuisine": cuisine}
 
-    return {
-        "query": query_str,
-        "zip_code": zip_code,
-        "type": "cuisine_zip",
-        "cuisine": cuisine,
-    }
+
+def preload_links(links_file: str, dedup: DeduplicationManager):
+    """Pre-load cached recovery links into pending_links before Phase 1."""
+    existing = set(load_json(RECOVERY_PENDING_LINKS, []))
+
+    with open(links_file) as f:
+        cached_links = json.load(f)
+
+    # Only add links not already in pending
+    added = 0
+    for link in cached_links:
+        if link not in existing:
+            existing.add(link)
+            added += 1
+
+    save_json(RECOVERY_PENDING_LINKS, list(existing))
+    print(f"Pre-loaded {added} cached links (total pending: {len(existing)})")
 
 
 def run_phase1(query_file: str, dedup: DeduplicationManager):
-    """Phase 1: Re-run search queries to collect unseen links."""
-    # Load queries
+    """Phase 1: Re-run search queries to find additional unseen links."""
     with open(query_file) as f:
         query_strings = json.load(f)
 
-    print(f"\n{'='*60}")
-    print("RECOVERY PHASE 1: Re-search to regenerate lost links")
-    print(f"{'='*60}")
-    print(f"Total queries in file: {len(query_strings)}")
-
-    # Load completed searches for this recovery run
     completed = set(load_json(RECOVERY_COMPLETED_SEARCHES, []))
-    print(f"Already completed (recovery): {len(completed)}")
-
-    # Filter to remaining
     remaining_strs = [q for q in query_strings if q not in completed]
+
+    # Load existing pending links (includes pre-loaded cached links)
+    pending_links = set(load_json(RECOVERY_PENDING_LINKS, []))
+
+    print(f"\n{'='*60}")
+    print("RECOVERY PHASE 1: Re-search for additional lost links")
+    print(f"{'='*60}")
+    print(f"Total queries: {len(query_strings)}")
+    print(f"Already completed: {len(completed)}")
     print(f"Remaining: {len(remaining_strs)}")
+    print(f"Pre-existing pending links: {len(pending_links)}")
     print(f"{'='*60}\n")
 
     if not remaining_strs:
         print("All recovery searches already completed!")
         return
-
-    # Load existing pending links
-    pending_links = set(load_json(RECOVERY_PENDING_LINKS, []))
-    print(f"Existing pending links: {len(pending_links)}")
 
     batch_size = Config.SEARCH_BATCH_SIZE
     total_new_links = 0
@@ -112,7 +110,6 @@ def run_phase1(query_file: str, dedup: DeduplicationManager):
         batch_num = (i // batch_size) + 1
         total_batches = (len(remaining_strs) + batch_size - 1) // batch_size
 
-        # Convert strings to query dicts
         batch_dicts = [query_str_to_dict(q) for q in batch_strs]
 
         print(f"\n--- Search Batch {batch_num}/{total_batches} ({len(batch_dicts)} queries) ---")
@@ -149,11 +146,8 @@ def run_phase1(query_file: str, dedup: DeduplicationManager):
         save_json(RECOVERY_PENDING_LINKS, list(pending_links))
 
         elapsed = time.time() - start_time
-        rate = len(completed) / (elapsed / 60) if elapsed > 0 else 0
-        remaining_count = len(remaining_strs) - len(completed) + len(query_strings) - len(remaining_strs)
-        # More accurate remaining
-        done_this_run = i + len(batch_strs)
-        actual_remaining = len(remaining_strs) - done_this_run
+        rate = (i + len(batch_strs)) / (elapsed / 60) if elapsed > 0 else 0
+        actual_remaining = len(remaining_strs) - (i + len(batch_strs))
         eta_min = actual_remaining / rate if rate > 0 else 0
 
         print(f"\n  Batch {batch_num}: +{batch_new} new links | "
@@ -161,7 +155,6 @@ def run_phase1(query_file: str, dedup: DeduplicationManager):
               f"Searches done: {len(completed)}/{len(query_strings)} | "
               f"Rate: {rate:.1f} q/min | ETA: {eta_min/60:.1f} hrs")
 
-        # Save progress
         save_json(RECOVERY_PROGRESS, {
             "phase": "search",
             "completed_searches": len(completed),
@@ -177,26 +170,14 @@ def run_phase1(query_file: str, dedup: DeduplicationManager):
     print(f"\n{'='*60}")
     print(f"RECOVERY PHASE 1 COMPLETE")
     print(f"Searches completed: {len(completed)}")
-    print(f"New unseen links found: {total_new_links}")
+    print(f"New links from re-search: {total_new_links}")
     print(f"Total pending links: {len(pending_links)}")
     print(f"{'='*60}\n")
 
 
-def run_phase2(dedup: DeduplicationManager, links_file: str = None):
-    """Phase 2: Scrape details from recovered pending links."""
-    if links_file:
-        # Load links directly from file (skips Phase 1 entirely)
-        with open(links_file) as f:
-            links = json.load(f)
-        # Merge with any existing pending links
-        existing = set(load_json(RECOVERY_PENDING_LINKS, []))
-        for link in links:
-            existing.add(link)
-        pending_links = list(existing)
-        save_json(RECOVERY_PENDING_LINKS, pending_links)
-        print(f"Loaded {len(links)} links from {links_file}")
-    else:
-        pending_links = load_json(RECOVERY_PENDING_LINKS, [])
+def run_phase2(dedup: DeduplicationManager):
+    """Phase 2: Scrape details from all pending links."""
+    pending_links = load_json(RECOVERY_PENDING_LINKS, [])
 
     print(f"\n{'='*60}")
     print("RECOVERY PHASE 2: Scrape details from recovered links")
@@ -230,8 +211,6 @@ def run_phase2(dedup: DeduplicationManager, links_file: str = None):
 
         try:
             results = scrape_places(batch, parallel=True)
-
-            # Filter None results and non-restaurants
             valid = [r for r in results if r is not None]
             unique = dedup.filter_unique(valid)
 
@@ -250,11 +229,9 @@ def run_phase2(dedup: DeduplicationManager, links_file: str = None):
         except Exception as e:
             print(f"  Error: {e}")
 
-        # Remove processed links regardless (matching current scraper behavior)
-        # TODO: Fix this design flaw - should only remove on success
         pending_links = pending_links[batch_size:]
 
-        # Save incrementally
+        # Save incrementally every batch
         save_json(RECOVERY_PENDING_LINKS, pending_links)
         save_json(RECOVERY_OUTPUT, all_results)
         dedup.save_checkpoint()
@@ -281,27 +258,32 @@ def run_phase2(dedup: DeduplicationManager, links_file: str = None):
 
 def main():
     parser = argparse.ArgumentParser(description="Recovery search for lost links")
-    parser.add_argument("--query-file", help="JSON file with list of query strings (required for Phase 1)")
-    parser.add_argument("--search-only", action="store_true", help="Only run Phase 1 (search), skip details")
-    parser.add_argument("--skip-search", action="store_true", help="Skip Phase 1, only run Phase 2 on existing pending")
-    parser.add_argument("--links-file", type=str, help="JSON file with list of URLs for direct Phase 2 (skips Phase 1)")
+    parser.add_argument("--query-file", help="JSON file with query strings for Phase 1 re-search")
+    parser.add_argument("--links-file", help="JSON file with cached URLs to pre-load into pending")
+    parser.add_argument("--skip-search", action="store_true", help="Skip Phase 1, only run Phase 2")
+    parser.add_argument("--search-only", action="store_true", help="Only run Phase 1, skip Phase 2")
     args = parser.parse_args()
 
     os.makedirs(RECOVERY_CHECKPOINT_DIR, exist_ok=True)
 
-    # Use the MAIN seen_places.json for dedup (shared with main scraper)
+    # Use the MAIN seen_places.json for dedup
     dedup = DeduplicationManager(MAIN_SEEN_PLACES)
     print(f"Dedup loaded: {dedup.place_id_count} place_ids, {len(dedup.seen_hashes)} hashes")
 
+    # Pre-load cached links if provided
     if args.links_file:
-        # Direct Phase 2 from links file (no Phase 1 needed)
-        run_phase2(dedup, links_file=args.links_file)
-    else:
-        if not args.skip_search:
-            run_phase1(args.query_file, dedup)
+        preload_links(args.links_file, dedup)
 
-        if not args.search_only:
-            run_phase2(dedup)
+    # Phase 1: Re-search to find additional links
+    if not args.skip_search:
+        if not args.query_file:
+            print("ERROR: --query-file required for Phase 1")
+            return
+        run_phase1(args.query_file, dedup)
+
+    # Phase 2: Scrape all pending links
+    if not args.search_only:
+        run_phase2(dedup)
 
 
 if __name__ == "__main__":
