@@ -1,14 +1,14 @@
 #!/bin/bash
-# Generic watchdog: monitors ANY running scraper and kills stale processes.
-# Auto-detects: recovery_search, rescrape_rejected, gmaps_scraper
-# Checks every 5 minutes. Kills if no checkpoint update in 30 min.
-# Does NOT auto-restart — scripts resume from checkpoint when re-launched.
+# Generic watchdog: monitors ANY running scraper, kills stale processes, auto-restarts.
+# Auto-detects: recovery (run_full_recovery.sh), rescrape_rejected, gmaps_scraper
+# Checks every 5 minutes. Kills + restarts if no checkpoint update in 30 min.
 
 BASE_DIR="/Users/donosclawdbot/repos/restaurant-scraper"
 SCRAPER_DIR="$BASE_DIR/us-restaurant-scraper"
 WATCHDOG_LOG="$BASE_DIR/logs/watchdog.log"
 STALE_SECONDS=1800  # 30 minutes
 PYTHON="$SCRAPER_DIR/.venv/bin/python3"
+LAST_RESTART_FILE="$BASE_DIR/logs/.watchdog_last_restart"
 
 mkdir -p "$(dirname "$WATCHDOG_LOG")"
 
@@ -28,6 +28,23 @@ detect_scraper() {
         echo "main"
     else
         echo "none"
+    fi
+}
+
+detect_machine() {
+    # Detect m1 or m2 from running process args or existing data files
+    local ps_out
+    ps_out=$(ps aux 2>/dev/null)
+    if echo "$ps_out" | grep -q "m2_\|m2 "; then
+        echo "m2"
+    elif echo "$ps_out" | grep -q "m1_\|m1 "; then
+        echo "m1"
+    elif [ -f "$BASE_DIR/m1_recovery_links.json" ]; then
+        echo "m1"
+    elif [ -f "$BASE_DIR/m2_recovery_links.json" ]; then
+        echo "m2"
+    else
+        echo "m1"  # default
     fi
 }
 
@@ -78,6 +95,52 @@ kill_all_scrapers() {
     log "  Cleanup done. Chrome remaining: $remaining"
 }
 
+restart_scraper() {
+    local scraper_type="$1"
+    local machine
+    machine=$(detect_machine)
+
+    # Prevent rapid restart loops: min 10 min between restarts
+    if [ -f "$LAST_RESTART_FILE" ]; then
+        local last_restart
+        last_restart=$(cat "$LAST_RESTART_FILE")
+        local now
+        now=$(date +%s)
+        local diff=$(( now - last_restart ))
+        if [ "$diff" -lt 600 ]; then
+            log "  Skipping restart — last restart was ${diff}s ago (min 600s)"
+            return
+        fi
+    fi
+    date +%s > "$LAST_RESTART_FILE"
+
+    case "$scraper_type" in
+        recovery)
+            log "  Restarting: run_full_recovery.sh $machine"
+            cd "$BASE_DIR"
+            nohup ./run_full_recovery.sh "$machine" >> "$BASE_DIR/logs/recovery_${machine}.log" 2>&1 &
+            log "  Started PID $!"
+            ;;
+        rescrape)
+            local rescrape_file="$BASE_DIR/${machine}_rescrape_place_ids.json"
+            if [ -f "$rescrape_file" ]; then
+                log "  Restarting: rescrape_rejected.py ($machine)"
+                cd "$SCRAPER_DIR"
+                PYTHONPATH=src nohup "$PYTHON" -u ../rescrape_rejected.py --place-ids-file "$rescrape_file" >> "$BASE_DIR/logs/rescrape_${machine}.log" 2>&1 &
+                log "  Started PID $!"
+            else
+                log "  Cannot restart rescrape — no place_ids file for $machine"
+            fi
+            ;;
+        main)
+            log "  Restarting: main scraper"
+            cd "$SCRAPER_DIR"
+            PYTHONPATH=src nohup "$PYTHON" -u -m gmaps_scraper --cuisine-expansion >> "$BASE_DIR/logs/scraper_main.log" 2>&1 &
+            log "  Started PID $!"
+            ;;
+    esac
+}
+
 chrome_count() {
     pgrep -f "Google Chrome.*bota" 2>/dev/null | wc -l | tr -d ' ' || echo "0"
 }
@@ -94,7 +157,7 @@ send_telegram_alert() {
 }
 
 # --- Main loop ---
-log "Watchdog started (generic mode)"
+log "Watchdog started (auto-restart mode)"
 
 while true; do
     sleep 300  # check every 5 minutes
@@ -125,8 +188,11 @@ while true; do
     # Staleness check
     if [ -n "$stale_secs" ] && [ "$stale_secs" -gt "$STALE_SECONDS" ]; then
         stale_min=$((stale_secs / 60))
-        log "STALE: $scraper_type no update in ${stale_min}m (chrome=$chrome) — killing"
-        send_telegram_alert "⚠️ WATCHDOG: $scraper_type stalled (${stale_min}m). Killed. Restart manually."
+        log "STALE: $scraper_type no update in ${stale_min}m (chrome=$chrome) — killing and restarting"
+        send_telegram_alert "⚠️ WATCHDOG: $scraper_type stalled (${stale_min}m). Killing and restarting."
         kill_all_scrapers
+        sleep 5
+        restart_scraper "$scraper_type"
+        send_telegram_alert "✅ WATCHDOG: $scraper_type restarted from checkpoint."
     fi
 done
