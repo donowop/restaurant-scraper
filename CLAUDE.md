@@ -144,6 +144,13 @@ restaurant-scraper/
 - `com.scraper.status` — DISABLED (replaced by Takopi)
 - `com.scraper.notify` — DISABLED (replaced by Telegram)
 
+### Multi-Machine (M2) Prompts
+- When giving the user a prompt to run on M2, ALWAYS use `git pull` to get scripts/data —
+  never tell the user to manually copy files
+- Commit and push all needed scripts and input data BEFORE generating the M2 prompt
+- M2 prompt should be fully self-contained: git pull, mkdir, chmod, nohup — one paste to run
+- Include `mkdir -p logs` so log paths work
+
 ---
 
 ## Response Style
