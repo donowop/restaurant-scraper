@@ -1,0 +1,8 @@
+.env
+logs/
+archive/
+output/
+cache/
+*.log
+__pycache__/
+*.egg-info/

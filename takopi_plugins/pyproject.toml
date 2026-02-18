@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "takopi-scraper-status"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = ["takopi>=0.21"]
+
+[project.entry-points."takopi.command_backends"]
+scraper_status = "scraper_status.backend:BACKEND"

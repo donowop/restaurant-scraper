@@ -40,6 +40,44 @@ SEARCH_BATCH_SIZE = 30      # Smaller batches = faster sync
 - `cache=False` required on @browser decorators (prevents Connection refused errors)
 - `reuse_driver=False` required (prevents stale driver connections)
 
+---
+
+## Scraper Robustness Rules (MANDATORY)
+**EVERY scrape script MUST have ALL of these. No exceptions.**
+
+### Browser Decorator Settings
+```python
+cache=False         # NEVER True — causes "Connection refused", stale data
+reuse_driver=False  # NEVER True — causes stale drivers, empty exceptions
+```
+
+### Chrome Process Cleanup
+- Kill stale Chrome on startup: `pkill -9 -f "Google Chrome.*bota"`
+- Check Chrome health every 5-10 batches during execution
+- MAX_HEALTHY_CHROME = 60 (5 browsers × ~10 procs each + buffer)
+- If over limit, kill all and let botasaurus respawn fresh
+- Pattern: `pgrep -f "Google Chrome.*bota"` to count
+
+### Error Rate Monitoring
+- Track error rate per batch (None results / batch size)
+- Halt after 5 consecutive batches with 80%+ error rate
+- Print WARNING with error counts so logs show problems early
+
+### Incremental Saving
+- Save results to disk EVERY batch, not just on completion
+- Save checkpoint state EVERY batch (done IDs, pending links)
+- Crash at batch 500 of 1000 must lose zero completed work
+
+### Pending Links Design
+- NEVER remove links from pending until extraction succeeds
+- Failed extractions stay in pending for retry
+
+### Telegram Status Updates
+- When starting ANY new scrape process, update the Takopi status plugin
+  (`takopi_plugins/scraper_status/backend.py`) to read the correct checkpoint
+- Also update `.claude/commands/scraper-status.md` if checkpoint paths change
+- User monitors progress via hourly Telegram — wrong checkpoint = wrong status
+
 ### Commands
 ```bash
 # Start scraper (moderate tier is default)
@@ -63,6 +101,48 @@ ps aux | grep -i chrome | grep -v grep | wc -l
 - `checkpoints/completed_searches.json` - done queries
 - `checkpoints/pending_links.json` - links for phase 2
 - `output/all_restaurants.json` - final data
+
+---
+
+## Repo Organization Rules (MANDATORY)
+
+### Directory Structure
+```
+restaurant-scraper/
+├── CLAUDE.md                      # Project instructions (source of truth)
+├── .env                           # Environment variables
+├── us-restaurant-scraper/         # Main scraper codebase + venv
+├── output/                        # Final results ONLY (all_restaurants.json/csv)
+├── logs/                          # ALL log files (scraper logs, watchdog, telegram)
+├── takopi_plugins/                # Telegram bot status plugin
+├── archive/                       # Old scripts, logs, data — never delete, just archive
+├── watchdog.sh                    # Generic watchdog (monitors any running scraper)
+├── scraper_telegram_notify.sh     # Hourly Telegram status (uses Takopi plugin)
+└── [active scripts]               # Only scripts for current operations
+```
+
+### Cleanup Rules
+- **Log files**: ALWAYS write to `logs/` directory, never repo root
+- **Temporary scripts**: After a one-off task (rescrape, recovery, merge), archive the script
+  once it's no longer needed. Don't leave dead scripts at root.
+- **Input data files** (recovery links, place IDs, etc.): Archive after the run completes
+- **Output batch files**: Only keep final merged result in `output/`. Batches go to archive.
+- **When creating new scripts**: Ask "will this be needed for future runs?"
+  - Yes → make it generic and keep at root
+  - No → plan to archive it after the run
+
+### Infrastructure Reuse
+- **watchdog.sh**: Generic — auto-detects recovery/rescrape/main scraper. Applies to ALL runs.
+- **scraper_telegram_notify.sh**: Uses Takopi plugin which auto-detects scraper type.
+  No manual updates needed per run.
+- When implementing a fix for one scraper issue (Chrome cleanup, error monitoring, etc.),
+  apply it to ALL active scraper scripts, not just the one that triggered the issue.
+
+### Launchd Agents (~/Library/LaunchAgents/)
+- `com.scraper.watchdog` — ACTIVE, runs watchdog.sh (generic, monitors any scraper)
+- `com.scraper.telegram` — ACTIVE, hourly Telegram status via Takopi plugin
+- `com.scraper.status` — DISABLED (replaced by Takopi)
+- `com.scraper.notify` — DISABLED (replaced by Telegram)
 
 ---
 
