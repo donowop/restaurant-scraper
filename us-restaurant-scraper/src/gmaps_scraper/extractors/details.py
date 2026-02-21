@@ -119,11 +119,13 @@ def _parse_review_count(reviews_text: str) -> Optional[int]:
 
 
 def _extract_review_count(driver: Driver) -> Optional[int]:
-    """Extract review count using multiple strategies to avoid the rating/review CSS bug.
+    """Extract review count using multiple strategies.
 
-    The old approach (div.F7nice > span:last-child) returns the rating text instead
-    of review count 96% of the time. This function uses aria-labels and text parsing.
+    Google Maps often hides review count from non-authenticated headless browsers.
+    Only ~7-10% of pages expose it, but we try everything available.
     """
+    html = driver.page_html
+
     # Strategy 1: aria-label on review chart button — "4.5 stars 1,234 Reviews"
     try:
         el = _get_element_or_none(driver, 'button[jsaction*="reviewChart"]')
@@ -148,12 +150,52 @@ def _extract_review_count(driver: Driver) -> Optional[int]:
 
     # Strategy 3: search page HTML for aria-label mentioning reviews with a count
     try:
-        html = driver.page_html
         matches = re.findall(r'aria-label="([^"]*\d[^"]*[Rr]eview[^"]*)"', html)
         for m in matches:
             count = _parse_review_count(m)
             if count:
                 return count
+    except Exception:
+        pass
+
+    # Strategy 4: "Reviews" tab button may have count in aria-label or text
+    try:
+        tabs = driver.select_all("button[role='tab']")
+        for tab in tabs:
+            tab_text = tab.text or ""
+            tab_aria = tab.get_attribute("aria-label") or ""
+            for text in [tab_text, tab_aria]:
+                if "review" in text.lower():
+                    count = _parse_review_count(text)
+                    if count:
+                        return count
+    except Exception:
+        pass
+
+    # Strategy 5: Look for review count in spans near the rating area
+    # Some pages render "(N)" as a separate span element
+    try:
+        f7_pos = html.find("F7nice")
+        if f7_pos > 0:
+            # Check 3000 chars after rating area for parenthesized or plain numbers
+            context = html[f7_pos:f7_pos + 3000]
+            # "(1,234)" in a span
+            span_counts = re.findall(r'<span[^>]*>\(?([\d,]+)\)?</span>', context)
+            for num_str in span_counts:
+                val = int(num_str.replace(",", ""))
+                # Must be > 0 and not look like a rating (exclude 1-50 range)
+                if val > 50:
+                    return val
+    except Exception:
+        pass
+
+    # Strategy 6: Search for "N reviews" anywhere in visible text
+    try:
+        review_texts = re.findall(r'>([\d,]+)\s+reviews?<', html, re.IGNORECASE)
+        for rt in review_texts:
+            val = int(rt.replace(",", ""))
+            if val > 0:
+                return val
     except Exception:
         pass
 
@@ -265,57 +307,103 @@ def _parse_address_components(address: str) -> dict[str, Optional[str]]:
     return result
 
 
-def _expand_hours_table(driver: Driver) -> bool:
-    """Try multiple strategies to expand the weekly hours table. Returns True if expanded."""
-    hours_selector = '[data-item-id="oh"]'
-    table_class = "y0skZc"
+def _count_hours_rows(html: str) -> int:
+    """Count the number of day rows in the hours table."""
+    return len(re.findall(r'<tr[^>]*class="[^"]*y0skZc', html))
 
-    # Check if table is already expanded
-    if table_class in driver.page_html:
+
+def _expand_hours_table(driver: Driver) -> bool:
+    """Try multiple strategies to expand the weekly hours table.
+
+    Returns True if the table has multiple day rows (expanded).
+    The main challenge: Google Maps uses `div.OMl5r[role="button"]` as the
+    hours dropdown, NOT `[data-item-id="oh"]` (which often doesn't exist).
+    JS .click() often fails to trigger the expansion — native driver.click()
+    with mouse simulation works more reliably.
+    """
+    table_class = "y0skZc"
+    html = driver.page_html
+
+    # Check if table already has multiple rows (fully expanded)
+    if _count_hours_rows(html) >= 7:
         return True
 
-    # Scroll hours section into view first
-    try:
-        driver.run_js(
-            f"document.querySelector('{hours_selector}').scrollIntoView({{block: 'center'}})"
-        )
-        driver.sleep(0.5)
-    except Exception:
-        pass
-
-    # Strategy 1: Click the dedicated arrow button
-    arrow_selectors = [
-        '[aria-label="Show open hours for the week"]',
-        '[data-item-id="oh"] [role="img"]',
-        '[data-item-id="oh"] .google-symbols',
+    # The hours dropdown is div.OMl5r[role="button"][aria-expanded]
+    # It contains the chevron span.puWIL[aria-label="Show open hours for the week"]
+    dropdown_selectors = [
+        'div.OMl5r[role="button"]',
+        '[data-item-id="oh"]',
     ]
-    for sel in arrow_selectors:
+
+    for dropdown_sel in dropdown_selectors:
         try:
-            if driver.is_element_present(sel, wait=1):
-                driver.run_js(f"document.querySelector('{sel}').click()")
+            if not driver.is_element_present(dropdown_sel, wait=2):
+                continue
+
+            # Scroll into view first
+            el = driver.select(dropdown_sel, wait=2)
+            el.scroll_into_view()
+            driver.sleep(0.5)
+
+            # Strategy 1: Native driver.click (simulates real mouse movement)
+            try:
+                driver.click(dropdown_sel)
                 driver.sleep(2)
-                if table_class in driver.page_html:
+                if _count_hours_rows(driver.page_html) >= 2:
                     return True
+            except Exception:
+                pass
+
+            # Strategy 2: Click the chevron arrow specifically
+            chevron_sel = '[aria-label="Show open hours for the week"]'
+            try:
+                if driver.is_element_present(chevron_sel, wait=1):
+                    driver.click(chevron_sel)
+                    driver.sleep(2)
+                    if _count_hours_rows(driver.page_html) >= 2:
+                        return True
+            except Exception:
+                pass
+
+            # Strategy 3: JS PointerEvent dispatch (Google Maps may listen for pointer events)
+            try:
+                driver.run_js(f"""
+                    var el = document.querySelector('{dropdown_sel}');
+                    if (el) {{
+                        el.dispatchEvent(new PointerEvent('pointerdown', {{bubbles: true}}));
+                        el.dispatchEvent(new PointerEvent('pointerup', {{bubbles: true}}));
+                        el.dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true}}));
+                    }}
+                """)
+                driver.sleep(2)
+                if _count_hours_rows(driver.page_html) >= 2:
+                    return True
+            except Exception:
+                pass
+
+            # Strategy 4: Focus and Enter key simulation
+            try:
+                driver.run_js(f"""
+                    var el = document.querySelector('{dropdown_sel}');
+                    if (el) {{
+                        el.focus();
+                        el.dispatchEvent(new KeyboardEvent('keydown', {{
+                            key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+                        }}));
+                    }}
+                """)
+                driver.sleep(2)
+                if _count_hours_rows(driver.page_html) >= 2:
+                    return True
+            except Exception:
+                pass
+
         except Exception:
             continue
 
-    # Strategy 2: Click the hours element itself (opens expanded view)
-    try:
-        driver.run_js(f"document.querySelector('{hours_selector}').click()")
-        driver.sleep(2)
-        if table_class in driver.page_html:
-            return True
-    except Exception:
-        pass
-
-    # Strategy 3: Try regular driver.click on the hours element
-    try:
-        driver.click(hours_selector)
-        driver.sleep(2)
-        if table_class in driver.page_html:
-            return True
-    except Exception:
-        pass
+    # Even with 1 row, it's still a table we can parse
+    if table_class in driver.page_html:
+        return True
 
     return False
 
@@ -359,11 +447,19 @@ def _parse_hours_table(html: str) -> dict[str, dict[str, str]]:
 
 
 def _extract_hours(driver: Driver) -> Optional[dict[str, dict[str, str]]]:
-    """Extract hours of operation and return as structured dict."""
-    try:
-        hours_selector = '[data-item-id="oh"]'
+    """Extract hours of operation and return as structured dict.
 
-        if not driver.is_element_present(hours_selector, wait=3):
+    Does NOT require [data-item-id="oh"] — that element often doesn't exist.
+    Instead looks for the hours dropdown (div.OMl5r) or the hours table directly.
+    """
+    try:
+        # Check if any hours-related element exists on the page
+        hours_present = (
+            driver.is_element_present('[data-item-id="oh"]', wait=1)
+            or driver.is_element_present('div.OMl5r[role="button"]', wait=1)
+            or "y0skZc" in driver.page_html
+        )
+        if not hours_present:
             return None
 
         # Try to expand the full weekly hours table
@@ -374,18 +470,48 @@ def _extract_hours(driver: Driver) -> Optional[dict[str, dict[str, str]]]:
             if hours_dict:
                 return hours_dict
 
-        # Fallback: parse aria-label on hours element (only today's hours)
-        hours_element = _get_element_or_none(driver, hours_selector)
-        if hours_element:
-            aria = hours_element.get_attribute("aria-label")
-            if aria:
-                aria = _normalize_text(aria)
+        # Fallback: parse the visible hours text from the dropdown area
+        # e.g., "Closes soon · 2 PM · Opens 11 AM Wed"
+        for sel in ['div.OMl5r[role="button"]', '[data-item-id="oh"]']:
+            try:
+                el = _get_element_or_none(driver, sel)
+                if not el:
+                    continue
+
+                # Try aria-label first
+                aria = el.get_attribute("aria-label")
+                text = _normalize_text(aria) if aria else None
+
+                # Fall back to visible text content
+                if not text:
+                    text = _normalize_text(el.text) if el.text else None
+
+                if not text:
+                    continue
+
+                # Parse "Closes X PM" and "Opens X AM" patterns
                 closes_match = re.search(
-                    r"Closes?\s+(\d{1,2}(?::\d{2})?\s*(?:AM|PM))", aria, re.IGNORECASE
+                    r"Closes?\s+(?:soon\s*[·.]\s*)?(\d{1,2}(?::\d{2})?\s*(?:AM|PM))",
+                    text, re.IGNORECASE,
                 )
                 opens_match = re.search(
-                    r"Opens?\s+(\d{1,2}(?::\d{2})?\s*(?:AM|PM))", aria, re.IGNORECASE
+                    r"Opens?\s+(\d{1,2}(?::\d{2})?\s*(?:AM|PM))",
+                    text, re.IGNORECASE,
                 )
+
+                # Also try "N AM to N PM" or "N AM–N PM" patterns
+                range_match = re.search(
+                    r"(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s*(?:to|–|-)\s*"
+                    r"(\d{1,2}(?::\d{2})?\s*(?:AM|PM))",
+                    text, re.IGNORECASE,
+                )
+
+                current_day = datetime.now().strftime("%A").lower()
+
+                if range_match:
+                    open_time = _parse_time_to_24h(range_match.group(1))
+                    close_time = _parse_time_to_24h(range_match.group(2))
+                    return {current_day: {"open": open_time, "close": close_time}}
 
                 close_time = (
                     _parse_time_to_24h(closes_match.group(1)) if closes_match else None
@@ -394,8 +520,6 @@ def _extract_hours(driver: Driver) -> Optional[dict[str, dict[str, str]]]:
                     _parse_time_to_24h(opens_match.group(1)) if opens_match else None
                 )
 
-                current_day = datetime.now().strftime("%A").lower()
-
                 if close_time or open_time:
                     return {
                         current_day: {
@@ -403,6 +527,31 @@ def _extract_hours(driver: Driver) -> Optional[dict[str, dict[str, str]]]:
                             "close": close_time if close_time else "unknown",
                         }
                     }
+            except Exception:
+                continue
+
+        # Last resort: parse aria-labels from table rows (even if only 1 row)
+        html = driver.page_html
+        table_matches = re.findall(
+            r'aria-label="(\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s*(?:to|–|-)\s*'
+            r'\d{1,2}(?::\d{2})?\s*(?:AM|PM))"',
+            html, re.IGNORECASE,
+        )
+        if table_matches:
+            current_day = datetime.now().strftime("%A").lower()
+            time_text = _normalize_text(table_matches[0])
+            time_match = re.search(
+                r"(\d{1,2}(?::\d{2})?\s*(?:AM|PM))\s*(?:to|–|-)\s*"
+                r"(\d{1,2}(?::\d{2})?\s*(?:AM|PM))",
+                time_text, re.IGNORECASE,
+            )
+            if time_match:
+                return {
+                    current_day: {
+                        "open": _parse_time_to_24h(time_match.group(1)),
+                        "close": _parse_time_to_24h(time_match.group(2)),
+                    }
+                }
 
     except Exception:
         pass

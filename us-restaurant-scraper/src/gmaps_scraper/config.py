@@ -40,7 +40,7 @@ class Config:
     HEADLESS = True  # Production mode
 
     # Parallelization
-    MAX_PARALLEL_BROWSERS = 5  # Sweet spot: 30 q/min with reduced scrolls
+    MAX_PARALLEL_BROWSERS = 8  # M2 can handle 8; M1 uses 5
 
     # Output settings
     OUTPUT_DIR = "output"

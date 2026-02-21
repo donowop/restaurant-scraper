@@ -185,6 +185,23 @@ while true; do
         sleep 2
     fi
 
+    # fseventsd bloat check — heavy scraper I/O causes it to leak memory
+    # It stores no useful data for us (just FS change notifications for Spotlight/Time Machine).
+    # Safe to kill; launchd auto-restarts it fresh within seconds.
+    fseventsd_rss=$(ps -p $(pgrep -x fseventsd 2>/dev/null || echo 0) -o rss= 2>/dev/null | tr -d ' ')
+    if [ -n "$fseventsd_rss" ] && [ "$fseventsd_rss" -gt 2097152 ]; then
+        fseventsd_mb=$((fseventsd_rss / 1024))
+        log "WARNING: fseventsd using ${fseventsd_mb}MB RAM — killing (auto-restarts clean)"
+        # To enable: echo "USERNAME ALL=(root) NOPASSWD: /usr/bin/killall fseventsd" | sudo tee /etc/sudoers.d/watchdog-fseventsd
+        sudo -n /usr/bin/killall fseventsd 2>/dev/null
+        if [ $? -eq 0 ]; then
+            send_telegram_alert "🧹 WATCHDOG: Killed bloated fseventsd (${fseventsd_mb}MB). Auto-restarted."
+        else
+            log "  Cannot kill fseventsd — needs sudoers entry for passwordless killall fseventsd"
+            send_telegram_alert "⚠️ WATCHDOG: fseventsd bloated (${fseventsd_mb}MB) but can't kill — needs sudoers"
+        fi
+    fi
+
     # Staleness check
     if [ -n "$stale_secs" ] && [ "$stale_secs" -gt "$STALE_SECONDS" ]; then
         stale_min=$((stale_secs / 60))

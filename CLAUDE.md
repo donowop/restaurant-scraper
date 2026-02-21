@@ -26,17 +26,22 @@ Rate = completed / (hours * 60) q/min | ETA = remaining / rate / 60 hours
 
 ### Config (config.py) - Optimized
 ```
-MAX_PARALLEL_BROWSERS = 5   # Sweet spot: 30 q/min (6+ browsers causes sync overhead)
+MAX_PARALLEL_BROWSERS = 8   # M2 (set to 5 on M1)
 MAX_SCROLLS = 7             # Most queries finish in 1-5 scrolls
 SCROLL_DELAY = 0.2          # Faster scrolling
 BATCH_DELAY = 2
 SEARCH_BATCH_SIZE = 30      # Smaller batches = faster sync
 ```
 
+### Machine Browser Limits
+- **M1** (donosclawdbot): **5 browsers** — sweet spot for M1 hardware, 30 q/min
+- **M2** (dono): **8 browsers** — more resources, handles 8 comfortably
+- After changing config.py, restart the scraper for it to take effect
+
 ### Performance Findings
-- **5 browsers = 30 q/min** (sweet spot)
-- 6 browsers = 15 q/min (batch sync overhead)
-- 8-10 browsers = unstable/stalls
+- **M2 search benchmark** (Feb 2026): 3=17.9, **8=20.4**, 10=17.5 q/min → 8 optimal
+- **M2 details benchmark**: 5=20.5, **8=24.6**, 12=19.8, 16=20.2, 20=16.2 /min → 8 optimal
+- **M1**: 5 browsers = 30 q/min (sweet spot), 6+ = degraded
 - `cache=False` required on @browser decorators (prevents Connection refused errors)
 - `reuse_driver=False` required (prevents stale driver connections)
 
@@ -54,9 +59,17 @@ reuse_driver=False  # NEVER True — causes stale drivers, empty exceptions
 ### Chrome Process Cleanup
 - Kill stale Chrome on startup: `pkill -9 -f "Google Chrome.*bota"`
 - Check Chrome health every 5-10 batches during execution
-- MAX_HEALTHY_CHROME = 60 (5 browsers × ~10 procs each + buffer)
+- MAX_HEALTHY_CHROME = 100 (8 browsers × ~10 procs each + buffer)
 - If over limit, kill all and let botasaurus respawn fresh
 - Pattern: `pgrep -f "Google Chrome.*bota"` to count
+
+### fseventsd Management
+- macOS `fseventsd` leaks memory under heavy scraper I/O (checkpoints every batch + Chrome temp files)
+- It stores NO useful data for us — just FS change notifications for Spotlight/Time Machine
+- Safe to kill anytime; launchd auto-restarts it within seconds, no data loss
+- **Watchdog monitors**: kills fseventsd automatically if RSS > 2GB
+- Requires passwordless sudo (scoped to fseventsd only): `echo "USERNAME ALL=(root) NOPASSWD: /usr/bin/killall fseventsd" | sudo tee /etc/sudoers.d/watchdog-fseventsd`
+- Manual kill: `sudo killall fseventsd`
 
 ### Error Rate Monitoring
 - Track error rate per batch (None results / batch size)
