@@ -9,6 +9,7 @@ WATCHDOG_LOG="$BASE_DIR/logs/watchdog.log"
 STALE_SECONDS=1800  # 30 minutes
 PYTHON="$SCRAPER_DIR/.venv/bin/python3"
 LAST_RESTART_FILE="$BASE_DIR/logs/.watchdog_last_restart"
+LAST_SCRAPER_FILE="$BASE_DIR/logs/.watchdog_last_scraper"
 
 mkdir -p "$(dirname "$WATCHDOG_LOG")"
 
@@ -174,8 +175,42 @@ while true; do
             log "No scraper running but $chrome Chrome processes found — cleaning up"
             pkill -9 -f "Google Chrome.*bota" 2>/dev/null || true
         fi
+
+        # Crash recovery: if a scraper was previously running, check if it has unfinished work
+        if [ -f "$LAST_SCRAPER_FILE" ]; then
+            last_type=$(cat "$LAST_SCRAPER_FILE")
+            last_checkpoint=$(get_checkpoint "$last_type")
+            if [ -n "$last_checkpoint" ] && [ -f "$last_checkpoint" ]; then
+                # Check if checkpoint shows incomplete work
+                has_pending=$($PYTHON -c "
+import json
+try:
+    p = json.load(open('$last_checkpoint'))
+    phase = p.get('phase', '')
+    if phase == 'complete':
+        print('no')
+    elif phase == 'details' and p.get('pending_links', 0) > 0:
+        print('yes')
+    elif phase == 'search' and p.get('completed_searches_count', 0) < 105184:
+        print('yes')
+    else:
+        print('no')
+except: print('no')
+" 2>/dev/null)
+                if [ "$has_pending" = "yes" ]; then
+                    log "CRASH DETECTED: $last_type exited with unfinished work — restarting"
+                    send_telegram_alert "💥 WATCHDOG: $last_type crashed (process gone). Restarting from checkpoint."
+                    sleep 5
+                    restart_scraper "$last_type"
+                    send_telegram_alert "✅ WATCHDOG: $last_type restarted from checkpoint."
+                fi
+            fi
+        fi
         continue
     fi
+
+    # Remember what's running so we can restart on crash
+    echo "$scraper_type" > "$LAST_SCRAPER_FILE"
 
     checkpoint=$(get_checkpoint "$scraper_type")
     chrome=$(chrome_count)
