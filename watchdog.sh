@@ -118,6 +118,24 @@ restart_scraper() {
     fi
     date +%s > "$LAST_RESTART_FILE"
 
+    # Touch checkpoint last_update so the stale check gives the new process time
+    local checkpoint
+    checkpoint=$(get_checkpoint "$scraper_type")
+    if [ -n "$checkpoint" ] && [ -f "$checkpoint" ]; then
+        $PYTHON -c "
+import json
+from datetime import datetime
+try:
+    with open('$checkpoint') as f:
+        p = json.load(f)
+    p['last_update'] = datetime.now().isoformat()
+    with open('$checkpoint', 'w') as f:
+        json.dump(p, f)
+except: pass
+" 2>/dev/null
+        log "  Updated checkpoint last_update to now"
+    fi
+
     case "$scraper_type" in
         recovery)
             log "  Restarting: run_full_recovery.sh $machine"
