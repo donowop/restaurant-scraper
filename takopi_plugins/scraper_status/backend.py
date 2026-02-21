@@ -199,11 +199,19 @@ def _get_status() -> str:
     elif scraper_type == "main":
         return _main_status()
     else:
-        # Nothing running — show most recent checkpoint
+        # Nothing running — check if recovery has unfinished work
         recovery_prog = _read_json(os.path.join(RECOVERY_CHECKPOINT_DIR, "progress.json"))
         main_prog = _read_json(os.path.join(MAIN_CHECKPOINT_DIR, "progress.json"))
 
-        # Show recovery if it exists, otherwise main
+        if recovery_prog and recovery_prog.get("phase") != "complete":
+            pending = recovery_prog.get("pending_links", 0)
+            if pending > 0:
+                return _recovery_status()
+
+        if main_prog and main_prog.get("phase") != "complete":
+            return _main_status()
+
+        # Everything complete
         if recovery_prog:
             return _recovery_status()
         elif main_prog:
