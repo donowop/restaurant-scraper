@@ -23,7 +23,7 @@ def _find_running_scraper() -> str | None:
             return "recovery"
         if "rescrape_rejected" in lines:
             return "rescrape"
-        if "gmaps_scraper" in lines and "grep" not in lines:
+        if ("-m gmaps_scraper" in lines or "gmaps_scraper.cli" in lines) and "grep" not in lines:
             return "main"
     except Exception:
         pass

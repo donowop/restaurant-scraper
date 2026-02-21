@@ -18,13 +18,16 @@ log() {
 
 detect_scraper() {
     # Returns: recovery | rescrape | main | none
+    # IMPORTANT: use grep -E for alternation. BSD grep \| is unreliable on macOS.
+    # Check recovery FIRST — recovery_search imports gmaps_scraper, so "gmaps_scraper"
+    # appears in worker processes even during recovery. Must not fall through to "main".
     local ps_out
     ps_out=$(ps aux 2>/dev/null)
-    if echo "$ps_out" | grep -q "recovery_search\|run_full_recovery"; then
+    if echo "$ps_out" | grep -E -q "recovery_search|run_full_recovery"; then
         echo "recovery"
     elif echo "$ps_out" | grep -q "rescrape_rejected"; then
         echo "rescrape"
-    elif echo "$ps_out" | grep -v grep | grep -q "gmaps_scraper"; then
+    elif echo "$ps_out" | grep -v grep | grep -E -q "\-m gmaps_scraper|gmaps_scraper.cli"; then
         echo "main"
     else
         echo "none"
@@ -35,9 +38,9 @@ detect_machine() {
     # Detect m1 or m2 from running process args or existing data files
     local ps_out
     ps_out=$(ps aux 2>/dev/null)
-    if echo "$ps_out" | grep -q "m2_\|m2 "; then
+    if echo "$ps_out" | grep -E -q "m2_|m2 "; then
         echo "m2"
-    elif echo "$ps_out" | grep -q "m1_\|m1 "; then
+    elif echo "$ps_out" | grep -E -q "m1_|m1 "; then
         echo "m1"
     elif [ -f "$BASE_DIR/m1_recovery_links.json" ]; then
         echo "m1"
